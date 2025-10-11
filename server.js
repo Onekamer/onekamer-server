@@ -255,7 +255,7 @@ app.post("/create-checkout-session", async (req, res) => {
 });
 
 // ============================================================
-// 3️⃣ Création de session Stripe - Abonnements
+// 3️⃣ Création de session Stripe - Abonnements (corrigée ✅)
 // ============================================================
 
 app.post("/create-subscription-session", async (req, res) => {
@@ -286,7 +286,8 @@ app.post("/create-subscription-session", async (req, res) => {
       metadata: { userId, planKey },
     });
 
-    res.json({ id: session.id });
+    // ✅ Correction ici : on renvoie maintenant l'URL
+    res.json({ url: session.url });
   } catch (err) {
     console.error("❌ Erreur création session abonnement :", err);
     res.status(500).json({ error: err.message });
