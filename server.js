@@ -10,7 +10,9 @@ import Stripe from "stripe";
 import bodyParser from "body-parser";
 import cors from "cors";
 import { createClient } from "@supabase/supabase-js";
-import fetch from "node-fetch"; // ✅ Ajout pour notifications Telegram
+
+// ✅ Correction : utiliser le fetch natif de Node 18+ (pas besoin d'import)
+const fetch = globalThis.fetch;
 
 const app = express();
 
