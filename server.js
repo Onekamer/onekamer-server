@@ -302,7 +302,7 @@ app.post("/activate-free-plan", async (req, res) => {
 });
 
 // ============================================================
-// 5️⃣ Notification Telegram - Retrait OK COINS
+// 5️⃣ Notification Telegram - Retrait OK COINS (corrigée ✅)
 // ============================================================
 
 app.post("/notify-withdrawal", async (req, res) => {
@@ -313,6 +313,20 @@ app.post("/notify-withdrawal", async (req, res) => {
   }
 
   try {
+    // 🔹 Enregistrement du retrait dans Supabase
+    const { error: insertErr } = await supabase
+      .from("okcoins_transactions")
+      .insert({
+        user_id: userId,
+        amount,
+        type: "withdrawal",
+        status: "pending",
+        notified: false,
+      });
+
+    if (insertErr) throw new Error("Erreur d'enregistrement du retrait dans Supabase");
+
+    // 🔹 Notification Telegram
     const message = `
 💸 *Nouvelle demande de retrait OK COINS*  
 👤 Utilisateur : ${username}  
@@ -339,6 +353,15 @@ app.post("/notify-withdrawal", async (req, res) => {
     if (!data.ok) throw new Error(data.description || "Erreur API Telegram");
 
     console.log("📨 Notification Telegram envoyée avec succès.");
+
+    // 🔹 Marquer la transaction comme notifiée
+    await supabase
+      .from("okcoins_transactions")
+      .update({ notified: true })
+      .eq("user_id", userId)
+      .eq("amount", amount)
+      .eq("type", "withdrawal");
+
     res.json({ success: true });
   } catch (err) {
     console.error("❌ Erreur notification Telegram :", err);
