@@ -1,5 +1,5 @@
 // ============================================================
-// OneKamer - Serveur Stripe + Supabase (OK COINS + Abonnements + Rencontre + Accès)
+// OneKamer - Serveur Stripe + Supabase (OK COINS + Abonnements)
 // ============================================================
 
 import * as dotenv from "dotenv";
@@ -11,12 +11,9 @@ import bodyParser from "body-parser";
 import cors from "cors";
 import { createClient } from "@supabase/supabase-js";
 
-// ✅ Node 18+ : fetch natif
+// ✅ Correction : utiliser le fetch natif de Node 18+ (pas besoin d'import)
 const fetch = globalThis.fetch;
 
-// ------------------------------------------------------------
-// Initialisation
-// ------------------------------------------------------------
 const app = express();
 
 app.use(
@@ -37,83 +34,52 @@ const supabase = createClient(
 );
 
 // ============================================================
-// 0️⃣ Helpers : profils & contrôle d’accès (AJOUTÉS)
+// 🔎 Journalisation auto (évènements sensibles) -> public.server_logs
+//   Colonnes attendues (recommandées) :
+//     id uuid default gen_random_uuid() PK
+//     created_at timestamptz default now()
+//     category text            -- ex: 'stripe', 'subscription', 'okcoins', 'withdrawal', 'profile'
+//     action text              -- ex: 'webhook.received', 'checkout.created', ...
+//     status text              -- 'success' | 'error' | 'info'
+//     user_id uuid null
+//     context jsonb null
+//   ⚠️ Le code fonctionne même si des colonnes supplémentaires existent.
 // ============================================================
 
-// Récupère (plan, is_admin) d'un user
-async function getUserPlanAndAdmin(userId) {
-  const { data, error } = await supabase
-    .from("profiles")
-    .select("plan, is_admin")
-    .eq("id", userId)
-    .maybeSingle();
-
-  if (error) throw error;
-  const plan = (data?.plan || "free").toLowerCase();
-  const isAdmin = Boolean(data?.is_admin);
-  return { plan, isAdmin };
+function safeJson(obj) {
+  try {
+    // Retire les objets géants/Buffer si besoin
+    return JSON.parse(
+      JSON.stringify(obj, (_key, val) => {
+        if (typeof val === "bigint") return val.toString();
+        return val;
+      })
+    );
+  } catch (_e) {
+    return { note: "context serialization failed" };
+  }
 }
 
-// Matrice de droits côté back (alignée avec la logique BDD/Horizon)
-function hasAccessMatrix({ plan, isAdmin }, section, action = "read") {
-  if (isAdmin) return true;
-
-  const P = String(plan || "free").toLowerCase();
-
-  const rules = {
-    // Lecture ouverte pour tous; création VIP only
-    annonces: { read: ["free", "standard", "vip"], create: ["vip"] },
-
-    // Lecture ouverte pour tous; création VIP only
-    evenements: { read: ["free", "standard", "vip"], create: ["vip"] },
-
-    // Lecture pour tous; création admin only (donc ici false si non admin)
-    faits_divers: { read: ["free", "standard", "vip"], create: [] },
-
-    // Lecture + commentaires pour tous
-    echanges: { read: ["free", "standard", "vip"], comment: ["free", "standard", "vip"] },
-
-    // Partenaires: lecture Standard/VIP, création VIP
-    partenaires: { read: ["standard", "vip"], create: ["vip"] },
-
-    // Groupes: lecture/participation tous, création/gestion Standard & VIP
-    groupes: {
-      read: ["free", "standard", "vip"],
-      participate: ["free", "standard", "vip"],
-      create: ["standard", "vip"],
-      manage: ["standard", "vip"],
-    },
-
-    // Rencontre:
-    // - Lecture générale (feed / liste) réservée au VIP
-    // - Création du profil autorisée à TOUS (free, standard, vip)
-    // - Interaction (match/like/passe) réservée au VIP (standard = non, free = non)
-    rencontre: {
-      read: ["vip"],
-      create_profile: ["free", "standard", "vip"],
-      interact: ["vip"],
-    },
-
-    // OK COINS: accès pour tous (dons)
-    okcoins: { read: ["free", "standard", "vip"], donate: ["free", "standard", "vip"] },
-  };
-
-  const sect = rules[section];
-  if (!sect) return false;
-  const allowedPlans = sect[action];
-  if (!allowedPlans) return false;
-
-  return allowedPlans.includes(P);
-}
-
-// Wrapper d’accès
-async function checkAccess(userId, section, action = "read") {
-  const info = await getUserPlanAndAdmin(userId);
-  return hasAccessMatrix(info, section, action);
+async function logEvent({ category, action, status, userId = null, context = {} }) {
+  try {
+    const payload = {
+      category,
+      action,
+      status,
+      user_id: userId || null,
+      context: safeJson(context),
+    };
+    const { error } = await supabase.from("server_logs").insert(payload);
+    if (error) {
+      console.warn("⚠️ Log insert failed:", error.message);
+    }
+  } catch (e) {
+    console.warn("⚠️ Log error:", e?.message || e);
+  }
 }
 
 // ============================================================
-// 1️⃣ Webhook Stripe (OK COINS + Abonnements) — (INCHANGÉ)
+// 1️⃣ Webhook Stripe (OK COINS + Abonnements)
 // ============================================================
 
 app.post("/webhook", bodyParser.raw({ type: "application/json" }), async (req, res) => {
@@ -125,90 +91,201 @@ app.post("/webhook", bodyParser.raw({ type: "application/json" }), async (req, r
     event = stripe.webhooks.constructEvent(req.body, sig, endpointSecret);
   } catch (err) {
     console.error("❌ Webhook verification failed:", err.message);
+    await logEvent({
+      category: "stripe",
+      action: "webhook.verify",
+      status: "error",
+      context: { error: err.message },
+    });
     return res.status(400).send(`Webhook Error: ${err.message}`);
   }
 
   console.log("📦 Événement Stripe reçu :", event.type);
+  await logEvent({
+    category: "stripe",
+    action: "webhook.received",
+    status: "info",
+    context: { event_type: event.type, event_id: event.id },
+  });
 
   try {
-    // (A) Paiement OK COINS
     if (event.type === "checkout.session.completed") {
       const session = event.data.object;
       const { userId, packId, planKey } = session.metadata || {};
 
       // Cas 1 : Achat OK COINS
       if (packId) {
-        // Déduplication
-        const { error: evtErr } = await supabase
-          .from("stripe_events")
-          .insert({ event_id: event.id });
-        if (evtErr && evtErr.code === "23505") {
-          console.log("🔁 Événement déjà traité :", event.id);
-          return res.json({ received: true });
+        try {
+          const { error: evtErr } = await supabase
+            .from("stripe_events")
+            .insert({ event_id: event.id });
+          if (evtErr && evtErr.code === "23505") {
+            console.log("🔁 Événement déjà traité :", event.id);
+            await logEvent({
+              category: "okcoins",
+              action: "checkout.completed.duplicate",
+              status: "info",
+              userId,
+              context: { event_id: event.id, packId },
+            });
+            return res.json({ received: true });
+          }
+
+          const { data, error } = await supabase.rpc("okc_grant_pack_after_payment", {
+            p_user: userId,
+            p_pack_id: parseInt(packId, 10),
+            p_status: "paid",
+          });
+
+          if (error) {
+            console.error("❌ Erreur RPC Supabase (OK COINS):", error);
+            await logEvent({
+              category: "okcoins",
+              action: "checkout.completed.credit",
+              status: "error",
+              userId,
+              context: { packId, rpc_error: error.message },
+            });
+          } else {
+            console.log("✅ OK COINS crédités :", data);
+            await logEvent({
+              category: "okcoins",
+              action: "checkout.completed.credit",
+              status: "success",
+              userId,
+              context: { packId, data },
+            });
+          }
+        } catch (e) {
+          await logEvent({
+            category: "okcoins",
+            action: "checkout.completed.credit",
+            status: "error",
+            userId,
+            context: { packId, error: e?.message || e },
+          });
+          throw e;
         }
-
-        // Créditer OK COINS
-        const { data, error } = await supabase.rpc("okc_grant_pack_after_payment", {
-          p_user: userId,
-          p_pack_id: parseInt(packId, 10),
-          p_status: "paid",
-        });
-
-        if (error) console.error("❌ Erreur RPC Supabase (OK COINS):", error);
-        else console.log("✅ OK COINS crédités :", data);
       }
 
-      // Cas 2 : Abonnements
+      // Cas 2 : Abonnement Stripe (Standard / VIP)
       if (session.mode === "subscription" && planKey) {
-        const subscription = await stripe.subscriptions.retrieve(session.subscription);
-        const priceId = subscription.items.data[0]?.price?.id ?? null;
-        const currentPeriodEnd = new Date(subscription.current_period_end * 1000).toISOString();
-        const cancelAtPeriodEnd = Boolean(subscription.cancel_at_period_end);
-        const status =
-          subscription.status === "trialing"
-            ? "trialing"
-            : subscription.status === "active"
-            ? "active"
-            : subscription.status === "canceled"
-            ? "cancelled"
-            : "active";
+        try {
+          const subscription = await stripe.subscriptions.retrieve(session.subscription);
+          const priceId = subscription.items.data[0]?.price?.id ?? null;
+          const currentPeriodEnd = new Date(subscription.current_period_end * 1000).toISOString();
+          const cancelAtPeriodEnd = Boolean(subscription.cancel_at_period_end);
+          const status =
+            subscription.status === "trialing"
+              ? "trialing"
+              : subscription.status === "active"
+              ? "active"
+              : subscription.status === "canceled"
+              ? "cancelled"
+              : "active";
 
-        const { error: rpcError } = await supabase.rpc("upsert_subscription_from_stripe", {
-          p_user_id: userId,
-          p_plan_key: planKey,
-          p_stripe_customer_id: session.customer,
-          p_stripe_subscription_id: subscription.id,
-          p_stripe_price_id: priceId,
-          p_status: status,
-          p_current_period_end: currentPeriodEnd,
-          p_cancel_at_period_end: cancelAtPeriodEnd,
-        });
+          const { error: rpcError } = await supabase.rpc("upsert_subscription_from_stripe", {
+            p_user_id: userId,
+            p_plan_key: planKey,
+            p_stripe_customer_id: session.customer,
+            p_stripe_subscription_id: subscription.id,
+            p_stripe_price_id: priceId,
+            p_status: status,
+            p_current_period_end: currentPeriodEnd,
+            p_cancel_at_period_end: cancelAtPeriodEnd,
+          });
 
-        if (rpcError) console.error("❌ Erreur RPC Supabase (abo):", rpcError);
-        else console.log("✅ Abonnement mis à jour dans Supabase");
+          if (rpcError) {
+            console.error("❌ Erreur RPC Supabase (abo):", rpcError);
+            await logEvent({
+              category: "subscription",
+              action: "upsert.from_webhook",
+              status: "error",
+              userId,
+              context: { planKey, subscription_id: subscription.id, rpc_error: rpcError.message },
+            });
+          } else {
+            console.log("✅ Abonnement mis à jour dans Supabase");
+            await logEvent({
+              category: "subscription",
+              action: "upsert.from_webhook",
+              status: "success",
+              userId,
+              context: { planKey, subscription_id: subscription.id },
+            });
+          }
+        } catch (e) {
+          await logEvent({
+            category: "subscription",
+            action: "upsert.from_webhook",
+            status: "error",
+            userId,
+            context: { planKey, error: e?.message || e },
+          });
+          throw e;
+        }
       }
 
       // Cas 3 : Achat unique “VIP à vie”
       if (session.mode === "payment" && planKey === "vip_lifetime") {
-        const { error: insertErr } = await supabase.from("abonnements").insert({
-          profile_id: userId,
-          plan_name: "VIP à vie",
-          status: "active",
-          start_date: new Date().toISOString(),
-          auto_renew: false,
-          is_permanent: true,
-        });
-        if (insertErr) console.error("❌ Erreur insert VIP à vie:", insertErr);
-
-        const { error: rpcErr } = await supabase.rpc("apply_plan_to_profile", {
-          p_user_id: userId,
-          p_plan_key: "vip",
-        });
-        if (rpcErr) console.error("❌ Erreur RPC apply_plan_to_profile:", rpcErr);
+        try {
+          const { error: insertErr } = await supabase.from("abonnements").insert({
+            profile_id: userId,
+            plan_name: "VIP à vie",
+            status: "active",
+            start_date: new Date().toISOString(),
+            auto_renew: false,
+            is_permanent: true,
+          });
+          if (insertErr) {
+            console.error("❌ Erreur insert VIP à vie:", insertErr);
+            await logEvent({
+              category: "subscription",
+              action: "vip_lifetime.insert",
+              status: "error",
+              userId,
+              context: { error: insertErr.message },
+            });
+          } else {
+            const { error: rpcErr } = await supabase.rpc("apply_plan_to_profile", {
+              p_user_id: userId,
+              p_plan_key: "vip",
+            });
+            if (rpcErr) {
+              console.error("❌ Erreur RPC apply_plan_to_profile:", rpcErr);
+              await logEvent({
+                category: "subscription",
+                action: "vip_lifetime.apply_plan",
+                status: "error",
+                userId,
+                context: { error: rpcErr.message },
+              });
+            } else {
+              await logEvent({
+                category: "subscription",
+                action: "vip_lifetime.completed",
+                status: "success",
+                userId,
+                context: {},
+              });
+            }
+          }
+        } catch (e) {
+          await logEvent({
+            category: "subscription",
+            action: "vip_lifetime",
+            status: "error",
+            userId,
+            context: { error: e?.message || e },
+          });
+          throw e;
+        }
       }
     }
 
+    // =========================================================
     // (B) Mise à jour / annulation d’abonnement Stripe
+    // =========================================================
     if (
       event.type === "customer.subscription.updated" ||
       event.type === "customer.subscription.deleted"
@@ -228,64 +305,121 @@ app.post("/webhook", bodyParser.raw({ type: "application/json" }), async (req, r
           ? "cancelled"
           : "active";
 
-      // Cherche l'utilisateur lié à l'abonnement stripe
-      const { data: abo, error: aboErr } = await supabase
-        .from("abonnements")
-        .select("profile_id")
-        .eq("stripe_subscription_id", sub.id)
-        .limit(1)
-        .maybeSingle();
+      try {
+        // Trouver l’utilisateur lié à cet abonnement Stripe
+        const { data: abo, error: aboErr } = await supabase
+          .from("abonnements")
+          .select("profile_id")
+          .eq("stripe_subscription_id", sub.id)
+          .limit(1)
+          .maybeSingle();
 
-      if (aboErr) console.error("Erreur recherche abo:", aboErr);
-      if (!abo?.profile_id) return res.json({ received: true });
+        if (aboErr) {
+          console.error("Erreur recherche abo:", aboErr);
+          await logEvent({
+            category: "subscription",
+            action: "stripe.sub.update.lookup_user",
+            status: "error",
+            context: { subscription_id: sub.id, error: aboErr.message },
+          });
+        }
+        if (!abo?.profile_id) {
+          await logEvent({
+            category: "subscription",
+            action: "stripe.sub.update.no_user",
+            status: "info",
+            context: { subscription_id: sub.id },
+          });
+          return res.json({ received: true });
+        }
 
-      // Identifie le plan
-      const { data: plan } = await supabase
-        .from("pricing_plans")
-        .select("key")
-        .eq("stripe_price_id", priceId)
-        .maybeSingle();
+        // Identifier le plan
+        const { data: plan } = await supabase
+          .from("pricing_plans")
+          .select("key")
+          .eq("stripe_price_id", priceId)
+          .maybeSingle();
 
-      const planKey = plan?.key || "standard";
+        const planKey = plan?.key || "standard";
 
-      // Mise à jour via RPC
-      const { error: rpcError } = await supabase.rpc("upsert_subscription_from_stripe", {
-        p_user_id: abo.profile_id,
-        p_plan_key: planKey,
-        p_stripe_customer_id: sub.customer,
-        p_stripe_subscription_id: sub.id,
-        p_stripe_price_id: priceId,
-        p_status: status,
-        p_current_period_end: currentPeriodEnd,
-        p_cancel_at_period_end: cancelAtPeriodEnd,
-      });
+        // Appel RPC pour mise à jour
+        const { error: rpcError } = await supabase.rpc("upsert_subscription_from_stripe", {
+          p_user_id: abo.profile_id,
+          p_plan_key: planKey,
+          p_stripe_customer_id: sub.customer,
+          p_stripe_subscription_id: sub.id,
+          p_stripe_price_id: priceId,
+          p_status: status,
+          p_current_period_end: currentPeriodEnd,
+          p_cancel_at_period_end: cancelAtPeriodEnd,
+        });
 
-      if (rpcError) console.error("❌ Erreur update subscription:", rpcError);
-      else console.log("✅ Abonnement mis à jour après event Stripe");
+        if (rpcError) {
+          console.error("❌ Erreur update subscription:", rpcError);
+          await logEvent({
+            category: "subscription",
+            action: "stripe.sub.update",
+            status: "error",
+            userId: abo.profile_id,
+            context: { subscription_id: sub.id, planKey, error: rpcError.message },
+          });
+        } else {
+          console.log("✅ Abonnement mis à jour après event Stripe");
+          await logEvent({
+            category: "subscription",
+            action: "stripe.sub.update",
+            status: "success",
+            userId: abo.profile_id,
+            context: { subscription_id: sub.id, planKey, status },
+          });
+        }
+      } catch (e) {
+        await logEvent({
+          category: "subscription",
+          action: "stripe.sub.update",
+          status: "error",
+          context: { subscription_id: sub?.id, error: e?.message || e },
+        });
+        throw e;
+      }
     }
 
     res.json({ received: true });
   } catch (err) {
     console.error("❌ Erreur interne Webhook :", err);
+    await logEvent({
+      category: "stripe",
+      action: "webhook.handler",
+      status: "error",
+      context: { event_type: event?.type, error: err?.message || err },
+    });
     res.status(500).send("Erreur serveur interne");
   }
 });
 
 // ============================================================
-// 2️⃣ Création de session Stripe - OK COINS — (INCHANGÉ)
+// 2️⃣ Création de session Stripe - OK COINS
 // ============================================================
 
 app.use(bodyParser.json());
 app.use(bodyParser.urlencoded({ extended: true }));
 
 app.post("/create-checkout-session", async (req, res) => {
-  try {
-    const { packId, userId } = req.body;
+  const { packId, userId } = req.body;
 
+  try {
     if (!packId || !userId) {
+      await logEvent({
+        category: "okcoins",
+        action: "checkout.create",
+        status: "error",
+        userId,
+        context: { reason: "missing packId or userId" },
+      });
       return res.status(400).json({ error: "packId et userId sont requis" });
     }
 
+    // Récupère les infos du pack dans Supabase
     const { data: pack, error: packErr } = await supabase
       .from("okcoins_packs")
       .select("pack_name, price_eur, is_active")
@@ -293,6 +427,13 @@ app.post("/create-checkout-session", async (req, res) => {
       .single();
 
     if (packErr || !pack || !pack.is_active) {
+      await logEvent({
+        category: "okcoins",
+        action: "checkout.create",
+        status: "error",
+        userId,
+        context: { packId, error: packErr?.message || "Pack introuvable ou inactif" },
+      });
       return res.status(404).json({ error: "Pack introuvable ou inactif" });
     }
 
@@ -314,22 +455,46 @@ app.post("/create-checkout-session", async (req, res) => {
       metadata: { userId, packId: String(packId) },
     });
 
+    await logEvent({
+      category: "okcoins",
+      action: "checkout.create",
+      status: "success",
+      userId,
+      context: { packId, session_id: session.id },
+    });
+
     res.json({ url: session.url });
   } catch (err) {
     console.error("❌ Erreur création session Stripe :", err);
+    await logEvent({
+      category: "okcoins",
+      action: "checkout.create",
+      status: "error",
+      userId: req.body?.userId || null,
+      context: { packId: req.body?.packId, error: err?.message || err },
+    });
     res.status(500).json({ error: "Erreur serveur interne" });
   }
 });
 
 // ============================================================
-// 3️⃣ Création de session Stripe - Abonnements — (INCHANGÉ)
+// 3️⃣ Création de session Stripe - Abonnements
 // ============================================================
 
 app.post("/create-subscription-session", async (req, res) => {
+  const { userId, planKey, priceId } = req.body;
+
   try {
-    const { userId, planKey, priceId } = req.body;
-    if (!userId || !planKey)
+    if (!userId || !planKey) {
+      await logEvent({
+        category: "subscription",
+        action: "checkout.subscription.create",
+        status: "error",
+        userId,
+        context: { reason: "missing userId or planKey" },
+      });
       return res.status(400).json({ error: "userId et planKey sont requis" });
+    }
 
     let finalPriceId = priceId;
 
@@ -339,7 +504,16 @@ app.post("/create-subscription-session", async (req, res) => {
         .select("stripe_price_id")
         .eq("key", planKey)
         .maybeSingle();
-      if (planErr || !plan) throw new Error("Impossible de trouver le plan Stripe ID");
+      if (planErr || !plan) {
+        await logEvent({
+          category: "subscription",
+          action: "checkout.subscription.create",
+          status: "error",
+          userId,
+          context: { planKey, error: planErr?.message || "Impossible de trouver le plan Stripe ID" },
+        });
+        throw new Error("Impossible de trouver le plan Stripe ID");
+      }
       finalPriceId = plan.stripe_price_id;
     }
 
@@ -353,27 +527,59 @@ app.post("/create-subscription-session", async (req, res) => {
       metadata: { userId, planKey },
     });
 
+    await logEvent({
+      category: "subscription",
+      action: "checkout.subscription.create",
+      status: "success",
+      userId,
+      context: { planKey, price_id: finalPriceId, session_id: session.id },
+    });
+
     res.json({ url: session.url });
   } catch (err) {
     console.error("❌ Erreur création session abonnement :", err);
+    await logEvent({
+      category: "subscription",
+      action: "checkout.subscription.create",
+      status: "error",
+      userId: req.body?.userId || null,
+      context: { planKey: req.body?.planKey, error: err?.message || err },
+    });
     res.status(500).json({ error: err.message });
   }
 });
 
 // ============================================================
-// 4️⃣ Activation du plan gratuit — (INCHANGÉ)
+// 4️⃣ Activation du plan gratuit
 // ============================================================
 
 app.post("/activate-free-plan", async (req, res) => {
   try {
     const { userId } = req.body;
-    if (!userId) return res.status(400).json({ error: "userId requis" });
+    if (!userId) {
+      await logEvent({
+        category: "profile",
+        action: "plan.free.activate",
+        status: "error",
+        context: { reason: "missing userId" },
+      });
+      return res.status(400).json({ error: "userId requis" });
+    }
 
     const { error: rpcErr } = await supabase.rpc("apply_plan_to_profile", {
       p_user_id: userId,
       p_plan_key: "free",
     });
-    if (rpcErr) throw new Error(rpcErr.message);
+    if (rpcErr) {
+      await logEvent({
+        category: "profile",
+        action: "plan.free.apply",
+        status: "error",
+        userId,
+        context: { error: rpcErr.message },
+      });
+      throw new Error(rpcErr.message);
+    }
 
     const { error: insertErr } = await supabase.from("abonnements").insert({
       profile_id: userId,
@@ -381,34 +587,66 @@ app.post("/activate-free-plan", async (req, res) => {
       status: "active",
       auto_renew: false,
     });
-    if (insertErr) throw new Error(insertErr.message);
+    if (insertErr) {
+      await logEvent({
+        category: "profile",
+        action: "plan.free.insert",
+        status: "error",
+        userId,
+        context: { error: insertErr.message },
+      });
+      throw new Error(insertErr.message);
+    }
+
+    await logEvent({
+      category: "profile",
+      action: "plan.free.activated",
+      status: "success",
+      userId,
+      context: {},
+    });
 
     res.json({ ok: true });
   } catch (e) {
     console.error("❌ Erreur activation plan gratuit :", e);
+    await logEvent({
+      category: "profile",
+      action: "plan.free.activate",
+      status: "error",
+      userId: req?.body?.userId || null,
+      context: { error: e?.message || e },
+    });
     res.status(500).json({ error: e.message });
   }
 });
 
 // ============================================================
-// 5️⃣ Notification Telegram - Retrait OK COINS — (DÉJÀ PRÉSENT)
+// 5️⃣ Notification Telegram - Retrait OK COINS
 // ============================================================
 
 app.post("/notify-withdrawal", async (req, res) => {
   const { userId, username, email, amount } = req.body;
 
   if (!userId || !username || !email || !amount) {
+    await logEvent({
+      category: "withdrawal",
+      action: "telegram.notify",
+      status: "error",
+      userId: userId || null,
+      context: { reason: "missing fields", body: req.body },
+    });
     return res.status(400).json({ error: "Informations incomplètes pour la notification." });
   }
 
   try {
-    const message =
-      `💸 *Nouvelle demande de retrait OK COINS*\n` +
-      `👤 Utilisateur : ${username}\n` +
-      `📧 Email : ${email}\n` +
-      `🆔 ID : ${userId}\n` +
-      `💰 Montant demandé : ${Number(amount).toLocaleString("fr-FR")} pièces\n` +
-      `🕒 ${new Date().toLocaleString("fr-FR")}`;
+    const message = `
+💸 *Nouvelle demande de retrait OK COINS*  
+👤 Utilisateur : ${username}  
+📧 Email : ${email}  
+🆔 ID : ${userId}  
+💰 Montant demandé : ${Number(amount).toLocaleString("fr-FR")} pièces  
+🕒 ${new Date().toLocaleString("fr-FR")}
+`;
 
     const response = await fetch(
       `https://api.telegram.org/bot${process.env.TELEGRAM_BOT_TOKEN}/sendMessage`,
@@ -427,231 +665,30 @@ app.post("/notify-withdrawal", async (req, res) => {
     if (!data.ok) throw new Error(data.description || "Erreur API Telegram");
 
     console.log("📨 Notification Telegram envoyée avec succès.");
+    await logEvent({
+      category: "withdrawal",
+      action: "telegram.notify",
+      status: "success",
+      userId,
+      context: { telegram_message_id: data?.result?.message_id || null },
+    });
+
     res.json({ success: true });
   } catch (err) {
     console.error("❌ Erreur notification Telegram :", err);
+    await logEvent({
+      category: "withdrawal",
+      action: "telegram.notify",
+      status: "error",
+      userId,
+      context: { error: err?.message || err },
+    });
     res.status(500).json({ error: "Échec notification Telegram" });
   }
 });
 
 // ============================================================
-// 6️⃣ Rencontres (profils / likes / matches / messages) — (AJOUTÉS)
-// ============================================================
-
-// 6.1 Créer / mettre à jour le profil rencontre
-app.post("/rencontre/profile.upsert", async (req, res) => {
-  try {
-    const { userId, payload } = req.body; // payload = { name, age, city, ... } conforme à ta table
-    if (!userId || !payload?.name) {
-      return res.status(400).json({ error: "userId et name requis" });
-    }
-
-    // Tous les plans peuvent créer/éditer leur profil
-    const allowed = await checkAccess(userId, "rencontre", "create_profile");
-    if (!allowed) {
-      return res.status(403).json({ error: "Accès refusé (créer profil)" });
-    }
-
-    // upsert par user_id (clé unique dans ta table)
-    const { data, error } = await supabase
-      .from("rencontres")
-      .upsert(
-        {
-          user_id: userId,
-          ...payload,
-          updated_at: new Date().toISOString(),
-        },
-        { onConflict: "user_id" }
-      )
-      .select()
-      .single();
-
-    if (error) throw error;
-    res.json({ ok: true, profile: data });
-  } catch (e) {
-    console.error("❌ rencontre/profile.upsert :", e);
-    res.status(500).json({ error: e.message });
-  }
-});
-
-// 6.2 Like / Match
-app.post("/rencontre/like", async (req, res) => {
-  try {
-    const { userId, targetRencontreId } = req.body; // targetRencontreId = rencontres.id
-    if (!userId || !targetRencontreId) {
-      return res.status(400).json({ error: "userId et targetRencontreId requis" });
-    }
-
-    // Seuls VIP peuvent interagir
-    const allowed = await checkAccess(userId, "rencontre", "interact");
-    if (!allowed) {
-      return res.status(403).json({ error: "Accès refusé : interaction VIP requise" });
-    }
-
-    // Récupère le profil Rencontre de l'utilisateur (doit exister)
-    const { data: myRec, error: myErr } = await supabase
-      .from("rencontres")
-      .select("id")
-      .eq("user_id", userId)
-      .maybeSingle();
-    if (myErr) throw myErr;
-    if (!myRec?.id) return res.status(400).json({ error: "Crée d'abord ton profil rencontre" });
-
-    const likerId = myRec.id; // rencontres.id de l'utilisateur
-    const likedId = targetRencontreId;
-
-    // Insère le like
-    const { data: likeRow, error: likeErr } = await supabase
-      .from("rencontres_likes")
-      .insert({ liker_id: likerId, liked_id: likedId })
-      .select()
-      .single();
-
-    if (likeErr && likeErr.code !== "23505") throw likeErr; // 23505 = déjà liké
-
-    // Vérifie s’il y a match (l’inverse existe ?)
-    const { data: reverse, error: revErr } = await supabase
-      .from("rencontres_likes")
-      .select("id")
-      .eq("liker_id", likedId)
-      .eq("liked_id", likerId)
-      .maybeSingle();
-    if (revErr) throw revErr;
-
-    if (reverse?.id) {
-      // Marque les deux likes en match
-      await supabase
-        .from("rencontres_likes")
-        .update({ is_match: true })
-        .in("id", [reverse.id, likeRow?.id].filter(Boolean));
-
-      // Crée le match si pas déjà existant (unique LEAST/GREATEST)
-      const { error: mErr } = await supabase
-        .from("rencontres_matches")
-        .insert({
-          user1_id: likerId < likedId ? likerId : likedId,
-          user2_id: likerId < likedId ? likedId : likerId,
-        });
-      if (mErr && mErr.code !== "23505") throw mErr;
-
-      return res.json({ ok: true, matched: true });
-    }
-
-    res.json({ ok: true, matched: false });
-  } catch (e) {
-    console.error("❌ rencontre/like :", e);
-    res.status(500).json({ error: e.message });
-  }
-});
-
-// 6.3 Envoyer un message dans un match
-app.post("/rencontre/message", async (req, res) => {
-  try {
-    const { userId, matchId, content } = req.body;
-    if (!userId || !matchId || !content) {
-      return res.status(400).json({ error: "userId, matchId et content requis" });
-    }
-
-    // VIP requis pour interagir
-    const allowed = await checkAccess(userId, "rencontre", "interact");
-    if (!allowed) return res.status(403).json({ error: "Accès refusé : VIP requis" });
-
-    // Récupère le rencontres.id du user
-    const { data: myRec, error: myErr } = await supabase
-      .from("rencontres")
-      .select("id")
-      .eq("user_id", userId)
-      .maybeSingle();
-    if (myErr) throw myErr;
-    if (!myRec?.id) return res.status(400).json({ error: "Crée d'abord ton profil rencontre" });
-
-    // Vérifie que le user est participant du match
-    const { data: matchRow, error: mErr } = await supabase
-      .from("rencontres_matches")
-      .select("id, user1_id, user2_id")
-      .eq("id", matchId)
-      .maybeSingle();
-    if (mErr) throw mErr;
-    if (!matchRow) return res.status(404).json({ error: "Match introuvable" });
-
-    const isParticipant = [matchRow.user1_id, matchRow.user2_id].includes(myRec.id);
-    if (!isParticipant) return res.status(403).json({ error: "Non participant du match" });
-
-    // Détermine receiver
-    const receiverId = matchRow.user1_id === myRec.id ? matchRow.user2_id : matchRow.user1_id;
-
-    const { data, error } = await supabase
-      .from("rencontres_messages_prives")
-      .insert({
-        match_id: matchId,
-        sender_id: myRec.id,
-        receiver_id: receiverId,
-        content: String(content).trim(),
-      })
-      .select()
-      .single();
-
-    if (error) throw error;
-    res.json({ ok: true, message: data });
-  } catch (e) {
-    console.error("❌ rencontre/message :", e);
-    res.status(500).json({ error: e.message });
-  }
-});
-
-// 6.4 (Option) Liste des matchs du user
-app.get("/rencontre/matches/:userId", async (req, res) => {
-  try {
-    const userId = req.params.userId;
-    if (!userId) return res.status(400).json({ error: "userId requis" });
-
-    // VIP requis pour voir les matchs
-    const allowed = await checkAccess(userId, "rencontre", "interact");
-    if (!allowed) return res.status(403).json({ error: "Accès refusé : VIP requis" });
-
-    const { data: myRec, error: myErr } = await supabase
-      .from("rencontres")
-      .select("id")
-      .eq("user_id", userId)
-      .maybeSingle();
-    if (myErr) throw myErr;
-    if (!myRec?.id) return res.json({ ok: true, matches: [] });
-
-    const { data, error } = await supabase
-      .from("rencontres_matches")
-      .select("id, user1_id, user2_id, created_at")
-      .or(`user1_id.eq.${myRec.id},user2_id.eq.${myRec.id}`)
-      .order("created_at", { ascending: false });
-
-    if (error) throw error;
-    res.json({ ok: true, matches: data });
-  } catch (e) {
-    console.error("❌ rencontre/matches :", e);
-    res.status(500).json({ error: e.message });
-  }
-});
-
-// ============================================================
-// 7️⃣ Endpoint utilitaire : checker l’accès depuis le front (AJOUTÉ)
-// ============================================================
-// ex: GET /access/partenaires/read?userId=...
-// ex: GET /access/rencontre/interact?userId=...
-app.get("/access/:section/:action?", async (req, res) => {
-  try {
-    const { section, action = "read" } = req.params;
-    const { userId } = req.query;
-    if (!userId) return res.status(400).json({ error: "userId requis" });
-
-    const allowed = await checkAccess(String(userId), section, action);
-    res.json({ ok: true, section, action, userId, allowed });
-  } catch (e) {
-    console.error("❌ /access :", e);
-    res.status(500).json({ error: e.message });
-  }
-});
-
-// ============================================================
-// 8️⃣ Route de santé (Render health check) — (INCHANGÉ)
+// 6️⃣ Route de santé (Render health check)
 // ============================================================
 
 app.get("/", (req, res) => {
@@ -659,7 +696,7 @@ app.get("/", (req, res) => {
 });
 
 // ============================================================
-// 9️⃣ Lancement serveur — (INCHANGÉ)
+// 7️⃣ Lancement serveur
 // ============================================================
 
 const PORT = process.env.PORT || 3000;
