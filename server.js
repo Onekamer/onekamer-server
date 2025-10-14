@@ -48,7 +48,6 @@ const supabase = createClient(
 
 function safeJson(obj) {
   try {
-    // Retire les objets géants/Buffer si besoin
     return JSON.parse(
       JSON.stringify(obj, (_key, val) => {
         if (typeof val === "bigint") return val.toString();
