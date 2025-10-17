@@ -11,6 +11,7 @@ import bodyParser from "body-parser";
 import cors from "cors";
 import { createClient } from "@supabase/supabase-js";
 import uploadRoute from "./api/upload.js";
+import partenaireDefaultsRoute from "./api/fix-partenaire-images.js";
 
 // ✅ Correction : utiliser le fetch natif de Node 18+ (pas besoin d'import)
 const fetch = globalThis.fetch;
@@ -26,6 +27,7 @@ app.use(
 );
 
 app.use("/api", uploadRoute);
+app.use("/api", partenaireDefaultsRoute);
 
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY, {
   apiVersion: "2024-06-20",
