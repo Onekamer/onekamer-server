@@ -10,19 +10,19 @@ const supabase = createClient(
 
 // 🖼️ Mapping entre les industries et les images par défaut sur BunnyCDN
 const DEFAULT_IMAGES = {
-  "Restauration": "https://onekamer-media-cdn.b-cdn.net/partenaires/default_partenaire_restauration.png",
-  "Beauté & Bien-être": "https://onekamer-media-cdn.b-cdn.net/partenaires/default_partenaire_bien-etre.png",
-  "Technologie": "https://onekamer-media-cdn.b-cdn.net/partenaires/default_partenaire_technologies.png",
-  "Éducation": "https://onekamer-media-cdn.b-cdn.net/partenaires/default_partenaire_formations.png",
-  "Commerce": "https://onekamer-media-cdn.b-cdn.net/partenaires/default_partenaire_mode.png",
-  "Santé & Bien-être": "https://onekamer-media-cdn.b-cdn.net/partenaires/default_partenaire_bien-etre.png",
-  "Immobilier": "https://onekamer-media-cdn.b-cdn.net/partenaires/default_partenaire_immobilier.png",
-  "Finance & Services": "https://onekamer-media-cdn.b-cdn.net/partenaires/default_partenaire_finances.png",
-  "Événementiel": "https://onekamer-media-cdn.b-cdn.net/partenaires/default_partenaire_culture_evenementiel.png",
-  "Transport": "https://onekamer-media-cdn.b-cdn.net/partenaires/default_partenaire_transport.png",
-  "Médias & Réseaux": "https://onekamer-media-cdn.b-cdn.net/partenaires/default_partenaire_technologies.png",
-  "Public / Administratif": "https://onekamer-media-cdn.b-cdn.net/partenaires/default_partenaire_formations.png",
-  "Divers": "https://onekamer-media-cdn.b-cdn.net/partenaires/default_partenaire_mode.png",
+  "Restauration": "https://onekamer-media-cdn.b-cdn.net/partenaires/default_partenaires_restauration.png",
+  "Beauté & Bien-être": "https://onekamer-media-cdn.b-cdn.net/partenaires/default_partenaires_bien-etre.png",
+  "Technologie": "https://onekamer-media-cdn.b-cdn.net/partenaires/default_partenaires_technologies.png",
+  "Éducation": "https://onekamer-media-cdn.b-cdn.net/partenaires/default_partenaires_formations.png",
+  "Commerce": "https://onekamer-media-cdn.b-cdn.net/partenaires/default_partenaires_mode.png",
+  "Santé & Bien-être": "https://onekamer-media-cdn.b-cdn.net/partenaires/default_partenaires_bien-etre.png",
+  "Immobilier": "https://onekamer-media-cdn.b-cdn.net/partenaires/default_partenaires_immobilier.png",
+  "Finance & Services": "https://onekamer-media-cdn.b-cdn.net/partenaires/default_partenaires_finances.png",
+  "Événementiel": "https://onekamer-media-cdn.b-cdn.net/partenaires/default_partenaires_culture_evenementiel.png",
+  "Transport": "https://onekamer-media-cdn.b-cdn.net/partenaires/default_partenaires_transport.png",
+  "Médias & Réseaux": "https://onekamer-media-cdn.b-cdn.net/partenaires/default_partenaires_technologies.png",
+  "Public / Administratif": "https://onekamer-media-cdn.b-cdn.net/partenaires/default_partenaires_formations.png",
+  "Divers": "https://onekamer-media-cdn.b-cdn.net/partenaires/default_partenaires_mode.png",
 };
 
 // ✅ Route de correction automatique des images manquantes
