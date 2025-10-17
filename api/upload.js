@@ -1,6 +1,5 @@
 import express from "express";
 import multer from "multer";
-import fetch from "node-fetch";
 import { createClient } from "@supabase/supabase-js";
 
 const router = express.Router();
