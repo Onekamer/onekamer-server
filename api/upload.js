@@ -1,3 +1,4 @@
+
 import express from "express";
 import multer from "multer";
 import { createClient } from "@supabase/supabase-js";
@@ -25,7 +26,7 @@ const uploadMap = {
   comments: { folder: "comments", column: "media_url", typeColumn: "media_type" },
 };
 
-// 🟢 Route d’upload
+// 🟢 Route d’upload vers BunnyCDN
 router.post("/upload-media", upload.single("file"), async (req, res) => {
   try {
     const { type, recordId } = req.body;
@@ -38,8 +39,21 @@ router.post("/upload-media", upload.single("file"), async (req, res) => {
     const config = uploadMap[type];
     if (!config) return res.status(400).json({ error: "Type de table non reconnu" });
 
-    const fileName = `${Date.now()}_${file.originalname}`;
+    // ✅ Nom de fichier propre (évite les 'blob')
+    const originalName = file.originalname || "upload";
+    const extension = originalName.split(".").pop() || "jpg";
+    const fileName = `${Date.now()}_${originalName.replace(/\s+/g, "_")}`;
     const uploadPath = `${config.folder}/${fileName}`;
+
+    // ✅ Détection du type MIME (images, gif, vidéos)
+    let contentType = "application/octet-stream";
+    if (file.mimetype) {
+      contentType = file.mimetype;
+    } else if (["jpg", "jpeg", "png", "gif", "webp"].includes(extension.toLowerCase())) {
+      contentType = `image/${extension === "jpg" ? "jpeg" : extension}`;
+    } else if (["mp4", "mov", "webm"].includes(extension.toLowerCase())) {
+      contentType = `video/${extension}`;
+    }
 
     // 🔼 Upload vers BunnyCDN
     const uploadRes = await fetch(
@@ -48,7 +62,7 @@ router.post("/upload-media", upload.single("file"), async (req, res) => {
         method: "PUT",
         headers: {
           AccessKey: process.env.BUNNY_ACCESS_KEY,
-          "Content-Type": file.mimetype,
+          "Content-Type": contentType,
         },
         body: file.buffer,
       }
@@ -56,17 +70,18 @@ router.post("/upload-media", upload.single("file"), async (req, res) => {
 
     if (!uploadRes.ok) throw new Error("Erreur upload Bunny");
 
+    // ✅ URL CDN et détection du type
     const cdnUrl = `${process.env.BUNNY_CDN_URL}/${uploadPath}`;
-    const mediaType = file.mimetype.startsWith("video") ? "video" : "image";
+    const mediaType = contentType.startsWith("video") ? "video" : "image";
 
-    // 🧾 Données à mettre à jour dans Supabase
+    // 🧾 Prépare la mise à jour Supabase
     let updateData = { [config.column]: cdnUrl };
     if (config.typeColumn) updateData[config.typeColumn] = mediaType;
     if (config.videoColumn && mediaType === "video") {
       updateData = { [config.videoColumn]: cdnUrl };
     }
 
-    // 🧩 Mise à jour Supabase
+    // 📦 Mise à jour Supabase
     const { error: supaError } = await supabaseClient
       .from(type)
       .update(updateData)
@@ -78,10 +93,11 @@ router.post("/upload-media", upload.single("file"), async (req, res) => {
       success: true,
       url: cdnUrl,
       mediaType,
-      message: `Upload réussi dans ${config.folder}/${fileName}`,
+      contentType,
+      message: `✅ Upload réussi : ${uploadPath}`,
     });
   } catch (err) {
-    console.error("Erreur upload:", err);
+    console.error("❌ Erreur upload:", err);
     return res.status(500).json({ error: err.message });
   }
 });
