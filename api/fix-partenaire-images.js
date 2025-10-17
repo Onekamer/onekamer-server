@@ -26,14 +26,14 @@ router.get("/fix-partenaire-images", async (req, res) => {
   try {
     // On récupère tous les partenaires sans image
     const { data: partenaires, error } = await supabase
-      .from("partenaires")
-      .select(`
-        id,
-        media_url,
-        category_id,
-        categories:partenaires_categories(name)
-      `)
-      .or("media_url.is.null,media_url.eq.\"\"");
+  .from("partenaires")
+  .select(`
+    id,
+    media_url,
+    category_id,
+    partenaires_categories:category_id(name)
+  `)
+  .or("media_url.is.null,media_url.eq.\"\"");
 
     if (error) throw error;
     if (!partenaires?.length) {
