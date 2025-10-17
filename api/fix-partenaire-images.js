@@ -33,7 +33,7 @@ router.get("/fix-partenaire-images", async (req, res) => {
         category_id,
         categories:partenaires_categories(name)
       `)
-      .or("media_url.is.null,media_url.eq('')");
+      .or("media_url.is.null,media_url.eq.\"\"");
 
     if (error) throw error;
     if (!partenaires?.length) {
