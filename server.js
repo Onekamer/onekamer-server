@@ -18,7 +18,7 @@ const fetch = globalThis.fetch;
 // =======================================================
 // ✅ CONFIGURATION CORS — OneKamer Render + Horizon
 // =======================================================
-
+const app = express();
 // 🔹 Récupération et gestion de plusieurs origines depuis l'environnement
 const allowedOrigins = process.env.CORS_ORIGIN
   ? process.env.CORS_ORIGIN.split(",").map(origin => origin.trim())
@@ -45,7 +45,6 @@ app.use(
 );
 
 console.log("✅ CORS actif pour :", allowedOrigins.join(", "));
-const app = express();
 
 app.use("/api", uploadRoute);
 app.use("/api", partenaireDefaultsRoute);
