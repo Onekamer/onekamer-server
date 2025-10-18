@@ -18,7 +18,6 @@ const fetch = globalThis.fetch;
 // =======================================================
 // ✅ CONFIGURATION CORS — OneKamer Render + Horizon
 // =======================================================
-import cors from "cors";
 
 // 🔹 Récupération et gestion de plusieurs origines depuis l'environnement
 const allowedOrigins = process.env.CORS_ORIGIN
