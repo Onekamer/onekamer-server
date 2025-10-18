@@ -15,16 +15,38 @@ import partenaireDefaultsRoute from "./api/fix-partenaire-images.js";
 
 // ✅ Correction : utiliser le fetch natif de Node 18+ (pas besoin d'import)
 const fetch = globalThis.fetch;
+// =======================================================
+// ✅ CONFIGURATION CORS — OneKamer Render + Horizon
+// =======================================================
+import cors from "cors";
 
-const app = express();
+// 🔹 Récupération et gestion de plusieurs origines depuis l'environnement
+const allowedOrigins = process.env.CORS_ORIGIN
+  ? process.env.CORS_ORIGIN.split(",").map(origin => origin.trim())
+  : [
+      "https://onekamer.co",                        // Horizon (production)
+      "https://onekamer-front-render.onrender.com", // Render (test/labo)
+    ];
 
 app.use(
   cors({
-    origin: [process.env.FRONTEND_URL || "https://onekamer.co"],
-    methods: ["GET", "POST", "OPTIONS"],
-    allowedHeaders: ["Content-Type", "Authorization"],
+    origin: function (origin, callback) {
+      // Autorise les appels sans origin (ex: Postman, tests internes)
+      if (!origin) return callback(null, true);
+
+      if (allowedOrigins.includes(origin)) {
+        callback(null, true);
+      } else {
+        console.warn(`🚫 CORS refusé pour l'origine : ${origin}`);
+        callback(new Error("Non autorisé par CORS"));
+      }
+    },
+    credentials: true,
   })
 );
+
+console.log("✅ CORS actif pour :", allowedOrigins.join(", "));
+const app = express();
 
 app.use("/api", uploadRoute);
 app.use("/api", partenaireDefaultsRoute);
