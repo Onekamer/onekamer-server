@@ -12,6 +12,7 @@ import cors from "cors";
 import { createClient } from "@supabase/supabase-js";
 import uploadRoute from "./api/upload.js";
 import partenaireDefaultsRoute from "./api/fix-partenaire-images.js";
+import commentsRouter from "./api/comments.js";
 
 // ✅ Correction : utiliser le fetch natif de Node 18+ (pas besoin d'import)
 const fetch = globalThis.fetch;
@@ -48,6 +49,7 @@ console.log("✅ CORS actif pour :", allowedOrigins.join(", "));
 
 app.use("/api", uploadRoute);
 app.use("/api", partenaireDefaultsRoute);
+app.use("/comments", commentsRouter);
 
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY, {
   apiVersion: "2024-06-20",
