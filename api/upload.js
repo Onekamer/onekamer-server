@@ -25,6 +25,8 @@ router.post("/upload", upload.single("file"), async (req, res) => {
       "evenements",
       "comments",
       "misc",
+      "groupes",
+      "faits_divers",
     ];
     if (!allowedFolders.includes(folder)) {
       return res.status(400).json({ error: `Dossier non autorisé: ${folder}` });
