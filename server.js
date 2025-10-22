@@ -13,6 +13,7 @@ import { createClient } from "@supabase/supabase-js";
 import uploadRoute from "./api/upload.js";
 import partenaireDefaultsRoute from "./api/fix-partenaire-images.js";
 import fixAnnoncesImagesRoute from "./api/fix-annonces-images.js";
+import fixEvenementsImagesRoute from "./api/fix-evenements-images.js";
 
 
 // ✅ Correction : utiliser le fetch natif de Node 18+ (pas besoin d'import)
@@ -51,6 +52,7 @@ console.log("✅ CORS actif pour :", allowedOrigins.join(", "));
 app.use("/api", uploadRoute);
 app.use("/api", partenaireDefaultsRoute);
 app.use("/api", fixAnnoncesImagesRoute);
+app.use("/api", fixEvenementsImagesRoute);
 
 
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY, {
