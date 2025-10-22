@@ -8,52 +8,62 @@ const supabase = createClient(
   process.env.SUPABASE_SERVICE_ROLE_KEY
 );
 
-// 🖼️ Mapping entre les industries et les images par défaut sur BunnyCDN
-const DEFAULT_IMAGES = {
-  "Restauration": "https://onekamer-media-cdn.b-cdn.net/partenaires/default_partenaires_restauration.png",
-  "Beauté & Bien-être": "https://onekamer-media-cdn.b-cdn.net/partenaires/default_partenaires_bien-etre.png",
-  "Technologie": "https://onekamer-media-cdn.b-cdn.net/partenaires/default_partenaires_technologies.png",
-  "Éducation": "https://onekamer-media-cdn.b-cdn.net/partenaires/default_partenaires_formations.png",
-  "Commerce": "https://onekamer-media-cdn.b-cdn.net/partenaires/default_partenaires_mode.png",
-  "Santé & Bien-être": "https://onekamer-media-cdn.b-cdn.net/partenaires/default_partenaires_bien-etre.png",
-  "Immobilier": "https://onekamer-media-cdn.b-cdn.net/partenaires/default_partenaires_immobilier.png",
-  "Finance & Services": "https://onekamer-media-cdn.b-cdn.net/partenaires/default_partenaires_finances.png",
-  "Événementiel": "https://onekamer-media-cdn.b-cdn.net/partenaires/default_partenaires_culture_evenementiel.png",
-  "Transport": "https://onekamer-media-cdn.b-cdn.net/partenaires/default_partenaires_transport.png",
-  "Médias & Réseaux": "https://onekamer-media-cdn.b-cdn.net/partenaires/default_partenaires_technologies.png",
-  "Public / Administratif": "https://onekamer-media-cdn.b-cdn.net/partenaires/default_partenaires_formations.png",
-  "Divers": "https://onekamer-media-cdn.b-cdn.net/partenaires/default_partenaires_mode.png",
-};
+// 🧠 Fonction utilitaire : formatage du nom en slug pour trouver l'image correspondante
+const slugify = (str) =>
+  str
+    .normalize("NFD") // supprime les accents
+    .replace(/[\u0300-\u036f]/g, "")
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "_")
+    .replace(/^_+|_+$/g, "");
 
-// ✅ Route de correction automatique des images manquantes
+// ✅ Route automatisée de correction des images manquantes
 router.get("/fix-partenaire-images", async (req, res) => {
   try {
-    // On récupère tous les partenaires sans image
-    const { data: partenaires, error } = await supabase
+    // 1️⃣ Récupération de toutes les catégories pour construire dynamiquement le mapping
+    const { data: categories, error: catError } = await supabase
+      .from("partenaires_categories")
+      .select("id, nom");
+
+    if (catError) throw catError;
+    if (!categories?.length)
+      return res.status(400).json({ error: "Aucune catégorie trouvée." });
+
+    // 2️⃣ Construction du mapping dynamique à partir des noms de catégories
+    const CDN_BASE = "https://onekamer-media-cdn.b-cdn.net/partenaires/";
+    const defaultImages = {};
+
+    for (const cat of categories) {
+      const slug = slugify(cat.nom);
+      defaultImages[cat.nom] = `${CDN_BASE}default_partenaires_${slug}.png`;
+    }
+
+    // 3️⃣ Récupération de tous les partenaires sans image
+    const { data: partenaires, error: partenairesError } = await supabase
       .from("partenaires")
       .select(`
         id,
         media_url,
         category_id,
-        partenaires_categories:category_id(industrie)
+        partenaires_categories:category_id(nom)
       `)
       .or("media_url.is.null,media_url.eq.\"\"");
 
-    if (error) throw error;
+    if (partenairesError) throw partenairesError;
     if (!partenaires?.length)
       return res.status(200).json({ message: "Aucun partenaire à corriger." });
 
     let updated = 0;
 
+    // 4️⃣ Mise à jour des partenaires sans image
     for (const partenaire of partenaires) {
-      const industry = partenaire.partenaires_categories?.industrie?.trim();
-      if (!industry) continue;
+      const categorieNom = partenaire.partenaires_categories?.nom?.trim();
+      if (!categorieNom) continue;
 
       const defaultImage =
-        DEFAULT_IMAGES[industry] ||
-        "https://onekamer-media-cdn.b-cdn.net/partenaires/default_partenaire_mode.png";
+        defaultImages[categorieNom] ||
+        `${CDN_BASE}default_partenaires_autres.png`;
 
-      // Mise à jour de la ligne
       const { error: updateError } = await supabase
         .from("partenaires")
         .update({ media_url: defaultImage })
@@ -62,8 +72,10 @@ router.get("/fix-partenaire-images", async (req, res) => {
       if (!updateError) updated++;
     }
 
+    // ✅ Résumé
     res.status(200).json({
-      message: `${updated} partenaires mis à jour avec image par défaut.`,
+      message: `${updated} partenaires mis à jour avec images par défaut.`,
+      categories_count: categories.length,
     });
   } catch (err) {
     console.error("Erreur fix-partenaire-images:", err.message);
@@ -72,4 +84,5 @@ router.get("/fix-partenaire-images", async (req, res) => {
 });
 
 export default router;
+
 
