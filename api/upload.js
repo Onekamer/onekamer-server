@@ -16,13 +16,14 @@ router.post("/upload", upload.single("file"), async (req, res) => {
       return res.status(400).json({ error: "Aucun fichier reçu." });
     }
 
-    // 🧱 Whitelist des dossiers autorisés (sécurité)
+    // ✅ Whitelist des dossiers autorisés
     const allowedFolders = [
       "avatars",
       "posts",
       "partenaires",
       "annonces",
       "evenements",
+      "comments_audio", // ajouté pour les audios
       "comments",
       "misc",
       "groupes",
@@ -32,14 +33,41 @@ router.post("/upload", upload.single("file"), async (req, res) => {
       return res.status(400).json({ error: `Dossier non autorisé: ${folder}` });
     }
 
+    // ✅ Types MIME autorisés
+    const ALLOWED_AUDIO_TYPES = [
+      "audio/webm",
+      "audio/mpeg",
+      "audio/mp4",
+      "audio/ogg",
+      "audio/wav",
+      "audio/x-m4a",
+      "audio/x-aac",
+    ];
+
     // 🧠 Détection propre du mimetype + extension
     const mimeType = file.mimetype || "application/octet-stream";
-    const ext = mime.extension(mimeType) || "jpg";
+    const ext = mime.extension(mimeType) || "bin";
+
+    // 🛑 Vérification du type de fichier
+    const isImage = mimeType.startsWith("image/");
+    const isVideo = mimeType.startsWith("video/");
+    const isAudio = ALLOWED_AUDIO_TYPES.includes(mimeType);
+
+    if (!isImage && !isVideo && !isAudio) {
+      return res.status(400).json({
+        success: false,
+        message: `Type de fichier non pris en charge (${mimeType}).`,
+      });
+    }
 
     // 🔧 Nom de fichier sûr et unique
-    const originalName = file.originalname?.replace(/\s+/g, "_") || `upload.${ext}`;
+    const originalName =
+      file.originalname?.replace(/\s+/g, "_") || `upload.${ext}`;
     const fileName = `${Date.now()}_${originalName}`;
-    const uploadPath = `${folder}/${userId ? `${userId}_` : ""}${fileName}`;
+    const safeFolder = allowedFolders.includes(folder) ? folder : "misc";
+    const uploadPath = `${safeFolder}/${userId ? `${userId}_` : ""}${fileName}`;
+
+    console.log("📁 Upload vers:", uploadPath, "| Type:", mimeType);
 
     // 🚀 Upload vers Bunny Storage
     const response = await fetch(
