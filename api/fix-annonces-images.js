@@ -45,7 +45,7 @@ router.get("/fix-annonces-images", async (req, res) => {
         id,
         media_url,
         categorie_id,
-        annonces_categories:category_id(nom)
+        annonces_categories:categorie_id(nom)
       `)
       .or("media_url.is.null,media_url.eq.\"\"");
 
