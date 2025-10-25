@@ -8,7 +8,7 @@ const supabase = createClient(
   process.env.SUPABASE_SERVICE_ROLE_KEY
 );
 
-// 🧠 Fonction utilitaire : transformer un nom de catégorie en slug compatible avec BunnyCDN
+// 🧠 Fonction utilitaire : transformer un nom en slug compatible avec BunnyCDN
 const slugify = (str) =>
   str
     .normalize("NFD") // supprime les accents
@@ -17,35 +17,35 @@ const slugify = (str) =>
     .replace(/[^a-z0-9]+/g, "_")
     .replace(/^_+|_+$/g, "");
 
-// ✅ Route automatisée pour corriger les événements sans image
+// ✅ Route pour corriger les événements sans image
 router.get("/fix-evenements-images", async (req, res) => {
   try {
-    // 1️⃣ Récupérer toutes les catégories d'événements
-    const { data: categories, error: catError } = await supabase
-      .from("evenements_categories")
+    // 1️⃣ Récupération de tous les types d'événements
+    const { data: types, error: typesError } = await supabase
+      .from("evenements_types")
       .select("id, nom");
 
-    if (catError) throw catError;
-    if (!categories?.length)
-      return res.status(400).json({ error: "Aucune catégorie trouvée." });
+    if (typesError) throw typesError;
+    if (!types?.length)
+      return res.status(400).json({ error: "Aucun type d'événement trouvé." });
 
-    // 2️⃣ Construire dynamiquement le mapping entre catégorie et image
+    // 2️⃣ Construction du mapping type → image BunnyCDN
     const CDN_BASE = "https://onekamer-media-cdn.b-cdn.net/evenements/";
     const defaultImages = {};
 
-    for (const cat of categories) {
-      const slug = slugify(cat.nom);
-      defaultImages[cat.nom] = `${CDN_BASE}default_evenements_${slug}.png`;
+    for (const type of types) {
+      const slug = slugify(type.nom);
+      defaultImages[type.nom] = `${CDN_BASE}default_evenements_${slug}.png`;
     }
 
-    // 3️⃣ Récupérer tous les événements sans image
+    // 3️⃣ Récupération des événements sans image
     const { data: evenements, error: evError } = await supabase
       .from("evenements")
       .select(`
         id,
         media_url,
-        category_id,
-        evenements_categories:category_id(nom)
+        type_id,
+        evenements_types:type_id(nom)
       `)
       .or("media_url.is.null,media_url.eq.\"\"");
 
@@ -55,13 +55,19 @@ router.get("/fix-evenements-images", async (req, res) => {
 
     let updated = 0;
 
-    // 4️⃣ Mise à jour de chaque événement sans image
+    // 4️⃣ Mise à jour des événements sans image
     for (const event of evenements) {
-      const catName = event.evenements_categories?.nom?.trim();
-      if (!catName) continue;
+      const typeNom = event.evenements_types?.nom?.trim();
+      if (!typeNom) continue;
 
-      const defaultImage =
-        defaultImages[catName] || `${CDN_BASE}default_evenements_autres.png`;
+      let defaultImage =
+        defaultImages[typeNom] || `${CDN_BASE}default_evenements_autres.png`;
+
+      // 💡 Exemple correctif si une image a un nom légèrement différent
+      // (ex: "table_ronde" → "table-ronde.png")
+      if (typeNom.toLowerCase().includes("table ronde")) {
+        defaultImage = `${CDN_BASE}default_evenements_table_ronde.png`;
+      }
 
       const { error: updateError } = await supabase
         .from("evenements")
@@ -71,10 +77,9 @@ router.get("/fix-evenements-images", async (req, res) => {
       if (!updateError) updated++;
     }
 
-    // ✅ Retour d’un résumé clair
     res.status(200).json({
-      message: `${updated} événements mis à jour avec image par défaut.`,
-      categories_count: categories.length,
+      message: `${updated} événements mis à jour avec images par défaut.`,
+      types_count: types.length,
     });
   } catch (err) {
     console.error("Erreur fix-evenements-images:", err.message);
