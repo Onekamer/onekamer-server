@@ -44,8 +44,8 @@ router.get("/fix-partenaire-images", async (req, res) => {
       .select(`
         id,
         media_url,
-        categorie_id,
-        partenaires_categories:categorie_id(nom)
+        category_id,
+        partenaires_categories:category_id(nom)
       `)
       .or("media_url.is.null,media_url.eq.\"\"");
 
