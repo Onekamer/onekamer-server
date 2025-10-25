@@ -8,7 +8,9 @@ const upload = multer();
 // 🟢 Route universelle d’upload vers BunnyCDN
 router.post("/upload", upload.single("file"), async (req, res) => {
   try {
-    const { folder = "misc", userId } = req.body;
+    // ✅ Compatibilité étendue avec anciens et nouveaux champs
+    const folder = req.body.folder || req.body.type || "misc";
+    const userId = req.body.userId || req.body.recordId;
     const file = req.file;
 
     // 🧩 Vérification basique
