@@ -14,6 +14,7 @@ import uploadRoute from "./api/upload.js";
 import partenaireDefaultsRoute from "./api/fix-partenaire-images.js";
 import fixAnnoncesImagesRoute from "./api/fix-annonces-images.js";
 import fixEvenementsImagesRoute from "./api/fix-evenements-images.js";
+import notificationsRouter from "./api/notifications.js";
 
 
 // ✅ Correction : utiliser le fetch natif de Node 18+ (pas besoin d'import)
@@ -53,6 +54,7 @@ app.use("/api", uploadRoute);
 app.use("/api", partenaireDefaultsRoute);
 app.use("/api", fixAnnoncesImagesRoute);
 app.use("/api", fixEvenementsImagesRoute);
+app.use("/api", notificationsRouter);
 
 
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY, {
