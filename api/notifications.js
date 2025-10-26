@@ -2,6 +2,8 @@ import express from "express";
 import { createClient } from "@supabase/supabase-js";
 
 const router = express.Router();
+router.use(express.json());
+
 const fetch = globalThis.fetch;
 
 // ⚙️ Connexion Supabase
