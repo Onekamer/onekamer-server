@@ -720,6 +720,68 @@ app.post("/notify-withdrawal", async (req, res) => {
 });
 
 // ============================================================
+// 7️⃣ Notifications OneSignal
+// ============================================================
+
+app.post("/send-notification", async (req, res) => {
+  const { title, message } = req.body;
+
+  if (!title || !message) {
+    return res.status(400).json({ error: "title et message requis" });
+  }
+
+  try {
+    const response = await fetch("https://onesignal.com/api/v1/notifications", {
+      method: "POST",
+      headers: {
+        "Authorization": `Basic ${process.env.ONESIGNAL_API_KEY}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        app_id: process.env.ONESIGNAL_APP_ID,
+        headings: { en: title },
+        contents: { en: message },
+        included_segments: ["All"],
+        url: "https://onekamer.co", // optionnel: lien cliquable
+      }),
+    });
+
+    const data = await response.json();
+
+    if (data.errors) {
+      console.error("❌ Erreur OneSignal:", data.errors);
+      await logEvent({
+        category: "onesignal",
+        action: "notification.send",
+        status: "error",
+        context: { title, message, errors: data.errors },
+      });
+      return res.status(500).json({ error: data.errors });
+    }
+
+    console.log("✅ Notification OneSignal envoyée :", data.id);
+    await logEvent({
+      category: "onesignal",
+      action: "notification.send",
+      status: "success",
+      context: { title, message, notification_id: data.id },
+    });
+
+    res.json({ success: true, notification_id: data.id });
+  } catch (err) {
+    console.error("❌ Erreur envoi OneSignal:", err);
+    await logEvent({
+      category: "onesignal",
+      action: "notification.send",
+      status: "error",
+      context: { title, message, error: err.message },
+    });
+    res.status(500).json({ error: err.message });
+  }
+});
+console.log("✅ Route OneSignal /send-notification chargée");
+
+// ============================================================
 // 6️⃣ Route de santé (Render health check)
 // ============================================================
 
