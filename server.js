@@ -741,8 +741,8 @@ app.post("/send-notification", async (req, res) => {
         app_id: process.env.ONESIGNAL_APP_ID,
         headings: { en: title },
         contents: { en: message },
-        included_segments: ["All"],
-        url: "https://onekamer.co", // optionnel: lien cliquable
+        included_segments: ["All"], // Tous les abonnés
+        url: "https://onekamer.co",  // Lien cliquable optionnel
       }),
     });
 
@@ -779,7 +779,18 @@ app.post("/send-notification", async (req, res) => {
     res.status(500).json({ error: err.message });
   }
 });
+
 console.log("✅ Route OneSignal /send-notification chargée");
+
+// ============================================================
+// 🔁 Alias de compatibilité : /notifications/onesignal
+// (utilisé par le front Horizon / Codex)
+// ============================================================
+app.post("/notifications/onesignal", (req, res, next) => {
+  console.log("🔁 Alias activé : /notifications/onesignal → /send-notification");
+  req.url = "/send-notification";
+  app._router.handle(req, res, next);
+});
 
 // ============================================================
 // 6️⃣ Route de santé (Render health check)
