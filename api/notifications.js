@@ -16,60 +16,25 @@ const supabase = createClient(
 const ONESIGNAL_APP_ID = process.env.ONESIGNAL_APP_ID;
 const ONESIGNAL_API_KEY = process.env.ONESIGNAL_API_KEY;
 
-// ==================================================
-// 🔔 Webhook Supabase → Render → OneSignal
-// ==================================================
-router.post("/supabase-notification", async (req, res) => {
+// --------------------------------------------------
+// 🔔 1️⃣ ROUTE DIRECTE OneSignal (ancienne, stable)
+// --------------------------------------------------
+router.post("/notifications/onesignal", async (req, res) => {
   try {
-    const { record, type } = req.body;
-    if (type !== "INSERT" || !record) {
-      console.log("🟡 Ignoré (non INSERT ou record vide)");
-      return res.status(200).json({ ignored: true });
+    const { title, message, target, url } = req.body;
+
+    if (!target) {
+      return res.status(400).json({ error: "Target (player_id) requis" });
     }
 
-    const {
-      id,
-      user_id,
-      sender_id,
-      title,
-      message,
-      link,
-      type: notifType,
-    } = record;
-
-    console.log(`📨 Nouvelle notif [${notifType}] pour user ${user_id}`);
-
-    // ✅ Construction du message plus lisible
-    const headingText = title || "🔔 Notification OneKamer";
-    const contentText =
-      message ||
-      "Tu as reçu une nouvelle activité sur OneKamer (message, événement ou alerte).";
-
-    // ✅ Construction du lien complet
-    const fullUrl =
-      link && link.startsWith("http")
-        ? link
-        : `${process.env.FRONTEND_URL}${link || "/"}`;
-
-    // ✅ Payload complet pour OneSignal
     const payload = {
       app_id: ONESIGNAL_APP_ID,
-      include_external_user_ids: [user_id],
-      headings: { en: headingText },
-      contents: { en: contentText },
-      url: fullUrl,
-      data: {
-        notif_id: id,
-        type: notifType,
-        sender_id,
-        link: fullUrl,
-      },
-      android_accent_color: "2E86DE",
-      small_icon: "ic_stat_onesignal_default",
-      large_icon: "https://onekamer.co/logo512.png",
+      include_player_ids: [target],
+      headings: { en: title || "Notification OneKamer" },
+      contents: { en: message || "Nouveau message reçu sur OneKamer" },
+      url: url || "https://onekamer.co",
     };
 
-    // ✅ Envoi vers OneSignal
     const response = await fetch("https://onesignal.com/api/v1/notifications", {
       method: "POST",
       headers: {
@@ -82,30 +47,74 @@ router.post("/supabase-notification", async (req, res) => {
     const data = await response.json();
 
     if (response.ok) {
-      console.log(`✅ Notification envoyée à ${user_id} (${notifType})`);
+      console.log(`✅ OneSignal envoyé avec succès à ${target}`);
+      return res.status(200).json({ success: true, notification_id: data.id });
     } else {
       console.error("❌ Erreur OneSignal :", data);
+      return res.status(500).json({ error: data });
     }
-
-    res.status(200).json({ success: true, details: data });
   } catch (error) {
-    console.error("🔥 Erreur notif OneSignal :", error);
+    console.error("🔥 Erreur /notifications/onesignal :", error);
     res.status(500).json({ error: error.message });
   }
 });
 
-// ==================================================
-// 🔒 Route de test manuelle (via Postman / dev)
-// ==================================================
-router.post("/test-push", async (req, res) => {
+// --------------------------------------------------
+// 🔔 2️⃣ ROUTE AUTOMATIQUE SUPABASE → ONESIGNAL
+// --------------------------------------------------
+router.post("/api/supabase-notification", async (req, res) => {
+  try {
+    const { record, type } = req.body;
+
+    if (type !== "INSERT" || !record) {
+      console.log("🟡 Ignoré (pas un INSERT ou record vide)");
+      return res.status(200).json({ ignored: true });
+    }
+
+    const { id, user_id, sender_id, title, message, link, type: notifType } = record;
+    console.log(`📨 Nouvelle notif Supabase → OneSignal [${notifType}] pour user ${user_id}`);
+
+    const payload = {
+      app_id: ONESIGNAL_APP_ID,
+      include_external_user_ids: [user_id],
+      headings: { en: title || "Notification" },
+      contents: { en: message || "Nouvelle activité sur OneKamer" },
+      url: `https://onekamer.co${link || "/"}`,
+      data: { notif_id: id, sender_id, type: notifType },
+    };
+
+    const response = await fetch("https://onesignal.com/api/v1/notifications", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Basic ${ONESIGNAL_API_KEY}`,
+      },
+      body: JSON.stringify(payload),
+    });
+
+    const data = await response.json();
+    if (response.ok) {
+      console.log(`✅ Notification OneSignal envoyée à ${user_id} (${notifType})`);
+      res.status(200).json({ success: true, details: data });
+    } else {
+      console.error("❌ Erreur OneSignal :", data);
+      res.status(500).json({ error: data });
+    }
+  } catch (error) {
+    console.error("🔥 Erreur webhook Supabase → OneSignal :", error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// --------------------------------------------------
+// 🔔 3️⃣ ROUTE DE TEST MANUELLE (Postman / terminal)
+// --------------------------------------------------
+router.post("/api/test-push", async (req, res) => {
   const { user_id, title, message, link } = req.body;
 
-  try {
-    const fullUrl =
-      link && link.startsWith("http")
-        ? link
-        : `${process.env.FRONTEND_URL}${link || "/"}`;
+  if (!user_id) return res.status(400).json({ error: "user_id requis" });
 
+  try {
     const response = await fetch("https://onesignal.com/api/v1/notifications", {
       method: "POST",
       headers: {
@@ -116,15 +125,15 @@ router.post("/test-push", async (req, res) => {
         app_id: ONESIGNAL_APP_ID,
         include_external_user_ids: [user_id],
         headings: { en: title || "🔔 Notification OneKamer" },
-        contents: { en: message || "Nouvelle activité sur OneKamer" },
-        url: fullUrl,
+        contents: { en: message || "Nouvelle activité détectée" },
+        url: `https://onekamer.co${link || "/"}`,
       }),
     });
 
     const data = await response.json();
     res.json(data);
   } catch (err) {
-    console.error("❌ Erreur test push:", err);
+    console.error("❌ Erreur /api/test-push:", err);
     res.status(500).json({ error: err.message });
   }
 });
