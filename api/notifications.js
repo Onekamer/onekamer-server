@@ -124,7 +124,7 @@ router.post("/notifications/onesignal", async (req, res) => {
 // --------------------------------------------------
 // 🔔 2️⃣ ROUTE AUTOMATIQUE SUPABASE → ONESIGNAL
 // --------------------------------------------------
-router.post("/api/supabase-notification", async (req, res) => {
+router.post("/supabase-notification", async (req, res) => {
   try {
     const { record, type } = req.body;
 
@@ -148,6 +148,7 @@ router.post("/api/supabase-notification", async (req, res) => {
 
     // 🖼️ Récupère l’image dynamique depuis Supabase/BunnyCDN
     const imageUrl = await getImageForNotification(notifType, content_id);
+    console.log("🧩 Notification image URL:", imageUrl);
 
     const payload = {
       app_id: ONESIGNAL_APP_ID,
@@ -185,12 +186,14 @@ router.post("/api/supabase-notification", async (req, res) => {
 // --------------------------------------------------
 // 🔔 3️⃣ ROUTE DE TEST MANUELLE (Postman / terminal)
 // --------------------------------------------------
-router.post("/api/test-push", async (req, res) => {
+router.post("/test-push", async (req, res) => {
   const { user_id, title, message, link, image } = req.body;
 
   if (!user_id) return res.status(400).json({ error: "user_id requis" });
 
   try {
+    console.log("🧩 Test push image URL:", image);
+
     const response = await fetch("https://onesignal.com/api/v1/notifications", {
       method: "POST",
       headers: {
@@ -210,7 +213,7 @@ router.post("/api/test-push", async (req, res) => {
     const data = await response.json();
     res.json(data);
   } catch (err) {
-    console.error("❌ Erreur /api/test-push:", err);
+    console.error("❌ Erreur /test-push:", err);
     res.status(500).json({ error: err.message });
   }
 });
