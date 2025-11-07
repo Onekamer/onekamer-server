@@ -1,16 +1,23 @@
 import express from "express";
 import multer from "multer";
 import mime from "mime-types";
+import { createClient } from "@supabase/supabase-js";
 
 const router = express.Router();
 const upload = multer();
+
+// ✅ Initialisation Supabase (pour synchroniser les fichiers "rencontres")
+const supabase = createClient(
+  process.env.SUPABASE_URL,
+  process.env.SUPABASE_SERVICE_ROLE_KEY
+);
 
 // 🟢 Route universelle d’upload vers BunnyCDN
 router.post("/upload", upload.single("file"), async (req, res) => {
   try {
     // ✅ Compatibilité étendue avec anciens et nouveaux champs
     const folder = req.body.folder || req.body.type || "misc";
-    const userId = req.body.userId || req.body.recordId;
+    const userId = req.body.user_id || req.body.userId || req.body.recordId;
     const file = req.file;
 
     // 🧩 Vérification basique
@@ -68,7 +75,14 @@ router.post("/upload", upload.single("file"), async (req, res) => {
       file.originalname?.replace(/\s+/g, "_") || `upload.${ext}`;
     const fileName = `${Date.now()}_${originalName}`;
     const safeFolder = allowedFolders.includes(folder) ? folder : "misc";
-    const uploadPath = `${safeFolder}/${userId ? `${userId}_` : ""}${fileName}`;
+
+    // ✅ Organisation: pour "rencontres", on crée un sous-dossier par utilisateur (comme LAB)
+    let uploadPath;
+    if (safeFolder === "rencontres" && userId) {
+      uploadPath = `${safeFolder}/${userId}/${fileName}`;
+    } else {
+      uploadPath = `${safeFolder}/${fileName}`;
+    }
 
     console.log("📁 Upload vers:", uploadPath, "| Type:", mimeType);
 
@@ -92,7 +106,24 @@ router.post("/upload", upload.single("file"), async (req, res) => {
     }
 
     // 🌍 URL finale (CDN public)
-    const cdnUrl = `${process.env.BUNNY_CDN_URL}/${uploadPath}`;
+    let cdnUrl = `${process.env.BUNNY_CDN_URL}/${uploadPath}`;
+
+    // 🪄 Synchronisation dans Supabase pour permettre les URLs signées côté front
+    if (safeFolder === "rencontres") {
+      try {
+        const { error: supabaseError } = await supabase.storage
+          .from("rencontres")
+          .upload(uploadPath, file.buffer, {
+            contentType: mimeType,
+            upsert: true,
+          });
+        if (supabaseError) {
+          console.warn("⚠️ Upload Bunny réussi, mais échec Supabase :", supabaseError.message);
+        }
+      } catch (syncErr) {
+        console.warn("⚠️ Erreur de synchronisation Supabase :", syncErr.message);
+      }
+    }
 
     // ✅ Succès
     return res.status(200).json({
