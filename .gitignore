@@ -1,2 +1,35 @@
+# Ignore les fichiers d'environnement
+.env
 .env.local
-.env.local
+.env.*.local
+
+# Dossiers système / build
+node_modules
+dist
+build
+.cache
+tmp
+
+# Logs
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# Fichiers temporaires
+.DS_Store
+Thumbs.db
+
+# Fichiers SSL locaux éventuels
+*.pem
+
+# Fichiers de config personnels
+.vscode/
+.windsurf/
+.cursor/
+
+# Archives et backups
+*.zip
+*.tar
+*.tar.gz
+*.bak

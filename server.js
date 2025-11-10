@@ -15,7 +15,7 @@ import partenaireDefaultsRoute from "./api/fix-partenaire-images.js";
 import fixAnnoncesImagesRoute from "./api/fix-annonces-images.js";
 import fixEvenementsImagesRoute from "./api/fix-evenements-images.js";
 import notificationsRouter from "./api/notifications.js";
-
+import webpush from "web-push";
 
 // ✅ Correction : utiliser le fetch natif de Node 18+ (pas besoin d'import)
 const fetch = globalThis.fetch;
@@ -23,6 +23,7 @@ const fetch = globalThis.fetch;
 // ✅ CONFIGURATION CORS — OneKamer Render + Horizon
 // =======================================================
 const app = express();
+const NOTIF_PROVIDER = process.env.NOTIFICATIONS_PROVIDER || "onesignal";
 // 🔹 Récupération et gestion de plusieurs origines depuis l'environnement
 const allowedOrigins = process.env.CORS_ORIGIN
   ? process.env.CORS_ORIGIN.split(",").map(origin => origin.trim())
@@ -436,6 +437,24 @@ app.post("/webhook", bodyParser.raw({ type: "application/json" }), async (req, r
 app.use(bodyParser.json());
 app.use(bodyParser.urlencoded({ extended: true }));
 
+// ============================================================
+// 🔑 VAPID (Web Push) — Configuration
+// ============================================================
+const VAPID_PUBLIC_KEY = process.env.VAPID_PUBLIC_KEY;
+const VAPID_PRIVATE_KEY = process.env.VAPID_PRIVATE_KEY;
+const VAPID_SUBJECT = process.env.VAPID_SUBJECT || "mailto:contact@onekamer.co";
+
+if (VAPID_PUBLIC_KEY && VAPID_PRIVATE_KEY) {
+  try {
+    webpush.setVapidDetails(VAPID_SUBJECT, VAPID_PUBLIC_KEY, VAPID_PRIVATE_KEY);
+    console.log("✅ VAPID configuré (Web Push activé)");
+  } catch (e) {
+    console.warn("⚠️ Échec configuration VAPID:", e?.message || e);
+  }
+} else {
+  console.warn("ℹ️ VAPID non configuré (VAPID_PUBLIC_KEY/VAPID_PRIVATE_KEY manquants)");
+}
+
 app.post("/create-checkout-session", async (req, res) => {
   const { packId, userId } = req.body;
 
@@ -579,6 +598,116 @@ app.post("/create-subscription-session", async (req, res) => {
     });
     res.status(500).json({ error: err.message });
   }
+});
+
+// ============================================================
+// 🔔 Web Push (Option C) — Routes natives
+// ============================================================
+
+// Enregistrement abonnement Web Push
+app.post("/push/subscribe", async (req, res) => {
+  if (NOTIF_PROVIDER !== "supabase_light") return res.status(200).json({ ignored: true });
+
+  try {
+    const { userId, endpoint, keys } = req.body || {};
+    if (!userId || !endpoint || !keys?.p256dh || !keys?.auth) {
+      return res.status(400).json({ error: "userId, endpoint, keys.p256dh et keys.auth requis" });
+    }
+
+    await supabase.from("push_subscriptions").delete().eq("endpoint", endpoint);
+    const { error } = await supabase.from("push_subscriptions").insert({
+      user_id: userId,
+      endpoint,
+      p256dh: keys.p256dh,
+      auth: keys.auth,
+    });
+    if (error) {
+      console.error("❌ Erreur insert subscription:", error.message);
+      return res.status(500).json({ error: "Erreur enregistrement subscription" });
+    }
+
+    await logEvent({
+      category: "notifications",
+      action: "push.subscribe",
+      status: "success",
+      userId,
+      context: { endpoint },
+    });
+
+    res.json({ success: true });
+  } catch (e) {
+    console.error("❌ Erreur /push/subscribe:", e);
+    res.status(500).json({ error: e?.message || "Erreur interne" });
+  }
+});
+
+// Dispatch notification: insert + envoi Web Push
+app.post("/notifications/dispatch", async (req, res) => {
+  if (NOTIF_PROVIDER !== "supabase_light") return res.status(200).json({ ignored: true });
+
+  if (!VAPID_PUBLIC_KEY || !VAPID_PRIVATE_KEY) {
+    console.warn("⚠️ Dispatch refusé: VAPID non configuré");
+    return res.status(200).json({ success: false, reason: "vapid_not_configured" });
+  }
+
+  try {
+    const { title, message, targetUserIds = [], data = {}, url = "/" } = req.body || {};
+    if (!title || !message || !Array.isArray(targetUserIds) || targetUserIds.length === 0) {
+      return res.status(400).json({ error: "title, message et targetUserIds requis" });
+    }
+
+    try {
+      const rows = targetUserIds.map((uid) => ({ user_id: uid, title, message, type: data?.type || null, link: url }));
+      const { error: insErr } = await supabase.from("notifications").insert(rows);
+      if (insErr) console.warn("⚠️ Insert notifications échoué:", insErr.message);
+    } catch (e) {
+      console.warn("⚠️ Insert notifications (best-effort) erreur:", e?.message || e);
+    }
+
+    const { data: subs, error: subErr } = await supabase
+      .from("push_subscriptions")
+      .select("user_id, endpoint, p256dh, auth")
+      .in("user_id", targetUserIds);
+    if (subErr) console.warn("⚠️ Lecture subscriptions échouée:", subErr.message);
+
+    const icon = "https://onekamer-media-cdn.b-cdn.net/logo/IMG_0885%202.PNG";
+    const badge = "https://onekamer-media-cdn.b-cdn.net/favicon-32x32.png";
+    const payload = (uid) => JSON.stringify({ title: title || "OneKamer", body: message, icon, badge, url, data });
+
+    let sent = 0;
+    if (Array.isArray(subs)) {
+      for (const s of subs) {
+        try {
+          await webpush.sendNotification({ endpoint: s.endpoint, expirationTime: null, keys: { p256dh: s.p256dh, auth: s.auth } }, payload(s.user_id));
+          sent++;
+        } catch (e) {
+          console.warn("⚠️ Échec envoi push à", s.user_id, e?.statusCode || e?.message || e);
+        }
+      }
+    }
+
+    await logEvent({ category: "notifications", action: "dispatch", status: "success", context: { target_count: targetUserIds.length, sent } });
+    res.json({ success: true, sent });
+  } catch (e) {
+    console.error("❌ Erreur /notifications/dispatch:", e);
+    await logEvent({ category: "notifications", action: "dispatch", status: "error", context: { error: e?.message || e } });
+    res.status(500).json({ error: e?.message || "Erreur interne" });
+  }
+});
+
+// ============================================================
+// 🔁 Aliases compatibilité pour chemins /api
+// ============================================================
+app.post("/api/push/subscribe", (req, res, next) => {
+  console.log("🔁 Alias activé : /api/push/subscribe → /push/subscribe");
+  req.url = "/push/subscribe";
+  app._router.handle(req, res, next);
+});
+
+app.post("/api/notifications/dispatch", (req, res, next) => {
+  console.log("🔁 Alias activé : /api/notifications/dispatch → /notifications/dispatch");
+  req.url = "/notifications/dispatch";
+  app._router.handle(req, res, next);
 });
 
 // ============================================================
