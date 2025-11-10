@@ -16,6 +16,8 @@ import fixAnnoncesImagesRoute from "./api/fix-annonces-images.js";
 import fixEvenementsImagesRoute from "./api/fix-evenements-images.js";
 import notificationsRouter from "./api/notifications.js";
 import webpush from "web-push";
+import qrcodeRouter from "./api/qrcode.js";
+import cron from "node-cron";
 
 // ✅ Correction : utiliser le fetch natif de Node 18+ (pas besoin d'import)
 const fetch = globalThis.fetch;
@@ -56,6 +58,7 @@ app.use("/api", partenaireDefaultsRoute);
 app.use("/api", fixAnnoncesImagesRoute);
 app.use("/api", fixEvenementsImagesRoute);
 app.use("/api", notificationsRouter);
+app.use("/api", qrcodeRouter);
 
 
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY, {
@@ -436,6 +439,43 @@ app.post("/webhook", bodyParser.raw({ type: "application/json" }), async (req, r
 
 app.use(bodyParser.json());
 app.use(bodyParser.urlencoded({ extended: true }));
+
+// ============================================================
+// Expiration automatique des QR Codes (horaire)
+// ============================================================
+try {
+  cron.schedule("0 * * * *", async () => {
+    try {
+      const today = new Date().toISOString().slice(0, 10);
+      const { data: pastEvents, error: pastErr } = await supabase
+        .from("evenements")
+        .select("id")
+        .lt("date", today);
+      if (pastErr) {
+        await logEvent({ category: "qrcode", action: "expire.scan", status: "error", context: { error: pastErr.message } });
+        return;
+      }
+      const ids = Array.isArray(pastEvents) ? pastEvents.map((e) => e.id) : [];
+      if (ids.length === 0) {
+        await logEvent({ category: "qrcode", action: "expire.scan", status: "success", context: { updated: 0 } });
+        return;
+      }
+      const { data: updated, error: upErr } = await supabase
+        .from("event_qrcodes")
+        .update({ status: "expired" })
+        .in("event_id", ids)
+        .eq("status", "active")
+        .select("id");
+      if (upErr) {
+        await logEvent({ category: "qrcode", action: "expire.update", status: "error", context: { error: upErr.message } });
+      } else {
+        await logEvent({ category: "qrcode", action: "expire.update", status: "success", context: { updated: (updated?.length || 0) } });
+      }
+    } catch (e) {
+      await logEvent({ category: "qrcode", action: "expire.cron", status: "error", context: { error: e?.message || String(e) } });
+    }
+  });
+} catch {}
 
 // ============================================================
 // 🔑 VAPID (Web Push) — Configuration
