@@ -15,6 +15,7 @@ import partenaireDefaultsRoute from "./api/fix-partenaire-images.js";
 import fixAnnoncesImagesRoute from "./api/fix-annonces-images.js";
 import fixEvenementsImagesRoute from "./api/fix-evenements-images.js";
 import notificationsRouter from "./api/notifications.js";
+import pushRouter from "./api/push.js";
 import webpush from "web-push";
 import qrcodeRouter from "./api/qrcode.js";
 import cron from "node-cron";
@@ -57,6 +58,7 @@ app.use("/api", uploadRoute);
 app.use("/api", partenaireDefaultsRoute);
 app.use("/api", fixAnnoncesImagesRoute);
 app.use("/api", fixEvenementsImagesRoute);
+app.use("/api", pushRouter);
 app.use("/api", notificationsRouter);
 app.use("/api", qrcodeRouter);
 
@@ -747,6 +749,19 @@ app.post("/api/push/subscribe", (req, res, next) => {
 app.post("/api/notifications/dispatch", (req, res, next) => {
   console.log("🔁 Alias activé : /api/notifications/dispatch → /notifications/dispatch");
   req.url = "/notifications/dispatch";
+  app._router.handle(req, res, next);
+});
+
+// Legacy Supabase webhook targets → route vers le nouveau relais Web Push
+app.post("/api/supabase-notification", (req, res, next) => {
+  console.log("🔁 Alias activé : /api/supabase-notification → /push/supabase-notification");
+  req.url = "/push/supabase-notification";
+  app._router.handle(req, res, next);
+});
+
+app.post("/notifications/onesignal", (req, res, next) => {
+  console.log("🔁 Alias activé : /notifications/onesignal → /api/push/relay");
+  req.url = "/api/push/relay";
   app._router.handle(req, res, next);
 });
 
