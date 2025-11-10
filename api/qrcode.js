@@ -27,9 +27,19 @@ async function verifyAdminJWT(req) {
   const { data: userData, error: userErr } = await supabaseAuth.auth.getUser(token);
   if (userErr || !userData?.user) return { ok: false, reason: "invalid_token" };
   const uid = userData.user.id;
-  const allow = parseAdminAllowlist();
-  if (!allow.includes(uid)) return { ok: false, reason: "forbidden" };
-  return { ok: true, uid };
+  try {
+    const { data: prof, error: pErr } = await supabase
+      .from("profiles")
+      .select("is_admin, role")
+      .eq("id", uid)
+      .maybeSingle();
+    if (pErr) return { ok: false, reason: "forbidden" };
+    const isAdmin = !!prof?.is_admin || (prof?.role === "QRcode_Verif");
+    if (!isAdmin) return { ok: false, reason: "forbidden" };
+    return { ok: true, uid };
+  } catch {
+    return { ok: false, reason: "forbidden" };
+  }
 }
 
 // Génération d'un QR Code pour un utilisateur/événement
@@ -38,7 +48,6 @@ router.post("/qrcode/generate", async (req, res) => {
     const authHeader = req.headers["authorization"] || "";
     const token = authHeader.startsWith("Bearer ") ? authHeader.slice(7) : null;
     if (!token) return res.status(401).json({ error: "unauthorized" });
-
     const supabaseAuth = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_ANON_KEY);
     const { data: userData, error: userErr } = await supabaseAuth.auth.getUser(token);
     if (userErr || !userData?.user) return res.status(401).json({ error: "invalid_token" });
@@ -73,6 +82,28 @@ router.post("/qrcode/generate", async (req, res) => {
     return res.json({ qrcode_value, qrImage, status: data?.status || "active" });
   } catch (e) {
     return res.status(500).json({ error: e?.message || "Erreur interne" });
+  }
+});
+
+// Vérifier si l'utilisateur courant est autorisé à scanner (admin ou rôle QRcode_Verif)
+router.get("/qrcode/admin/me", async (req, res) => {
+  try {
+    const authHeader = req.headers["authorization"] || "";
+    const token = authHeader.startsWith("Bearer ") ? authHeader.slice(7) : null;
+    if (!token) return res.status(200).json({ isAdmin: false });
+    const supabaseAuth = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_ANON_KEY);
+    const { data: userData, error: userErr } = await supabaseAuth.auth.getUser(token);
+    if (userErr || !userData?.user) return res.status(200).json({ isAdmin: false });
+    const uid = userData.user.id;
+    const { data: prof } = await supabase
+      .from("profiles")
+      .select("is_admin, role")
+      .eq("id", uid)
+      .maybeSingle();
+    const isAdmin = !!prof?.is_admin || (prof?.role === "QRcode_Verif");
+    return res.json({ isAdmin: !!isAdmin });
+  } catch {
+    return res.json({ isAdmin: false });
   }
 });
 
