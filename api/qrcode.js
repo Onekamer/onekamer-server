@@ -76,6 +76,43 @@ router.post("/qrcode/generate", async (req, res) => {
   }
 });
 
+// Supprimer un QR Code (propriétaire uniquement)
+router.delete("/qrcode/:id", async (req, res) => {
+  try {
+    const authHeader = req.headers["authorization"] || "";
+    const token = authHeader.startsWith("Bearer ") ? authHeader.slice(7) : null;
+    if (!token) return res.status(401).json({ error: "unauthorized" });
+
+    const supabaseAuth = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_ANON_KEY);
+    const { data: userData, error: userErr } = await supabaseAuth.auth.getUser(token);
+    if (userErr || !userData?.user) return res.status(401).json({ error: "invalid_token" });
+
+    const user_id = userData.user.id;
+    const id = req.params.id;
+    if (!id) return res.status(400).json({ error: "id requis" });
+
+    const { data: item, error: getErr } = await supabase
+      .from("event_qrcodes")
+      .select("id, user_id")
+      .eq("id", id)
+      .maybeSingle();
+    if (getErr) return res.status(500).json({ error: getErr.message });
+    if (!item) return res.status(404).json({ error: "not_found" });
+    if (item.user_id !== user_id) return res.status(403).json({ error: "forbidden" });
+
+    const { error: delErr } = await supabase
+      .from("event_qrcodes")
+      .delete()
+      .eq("id", id)
+      .eq("user_id", user_id);
+    if (delErr) return res.status(500).json({ error: delErr.message });
+
+    return res.json({ deleted: true });
+  } catch (e) {
+    return res.status(500).json({ error: e?.message || "Erreur interne" });
+  }
+});
+
 // Vérification via secret admin
 router.get("/qrcode/verify", async (req, res) => {
   try {
