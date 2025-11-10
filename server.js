@@ -711,6 +711,126 @@ app.post("/api/notifications/dispatch", (req, res, next) => {
 });
 
 // ============================================================
+// 📥 Notifications API (liste + lecture) — PROD
+// ============================================================
+
+// Liste paginée des notifications pour un utilisateur
+// Query: userId (requis), limit (def 20), cursor (ISO date: created_at < cursor)
+app.get("/notifications", async (req, res) => {
+  try {
+    const userId = req.query.userId;
+    const limit = Math.min(parseInt(req.query.limit || "20", 10), 50);
+    const cursor = req.query.cursor; // ISO date string
+
+    if (!userId) return res.status(400).json({ error: "userId requis" });
+
+    let query = supabase
+      .from("notifications")
+      .select("id, created_at, title, message, type, link, is_read")
+      .eq("user_id", userId)
+      .order("created_at", { ascending: false })
+      .limit(limit + 1);
+
+    if (cursor) {
+      query = query.lt("created_at", cursor);
+    }
+
+    const { data, error } = await query;
+    if (error) throw new Error(error.message);
+
+    const hasMore = data && data.length > limit;
+    const items = hasMore ? data.slice(0, limit) : data || [];
+    const nextCursor = hasMore ? items[items.length - 1]?.created_at : null;
+
+    const { data: cntData, error: cntErr } = await supabase
+      .from("notifications")
+      .select("id", { count: "exact", head: true })
+      .eq("user_id", userId)
+      .eq("is_read", false);
+    if (cntErr) console.warn("⚠️ unreadCount error:", cntErr.message);
+
+    res.json({
+      items: items?.map((n) => ({
+        id: n.id,
+        created_at: n.created_at,
+        title: n.title,
+        body: n.message,
+        type: n.type,
+        deeplink: n.link || "/",
+        is_read: !!n.is_read,
+      })) || [],
+      nextCursor,
+      hasMore,
+      unreadCount: cntData === null ? 0 : (cntData?.length ?? 0),
+    });
+  } catch (e) {
+    console.error("❌ GET /notifications:", e);
+    res.status(500).json({ error: e?.message || "Erreur interne" });
+  }
+});
+
+// Marquer une notification comme lue
+// Body: { userId, id }
+app.post("/notifications/mark-read", bodyParser.json(), async (req, res) => {
+  try {
+    const { userId, id } = req.body || {};
+    if (!userId || !id) return res.status(400).json({ error: "userId et id requis" });
+
+    const { error } = await supabase
+      .from("notifications")
+      .update({ is_read: true, read_at: new Date().toISOString() })
+      .eq("id", id)
+      .eq("user_id", userId);
+    if (error) throw new Error(error.message);
+
+    res.json({ success: true });
+  } catch (e) {
+    console.error("❌ POST /notifications/mark-read:", e);
+    res.status(500).json({ error: e?.message || "Erreur interne" });
+  }
+});
+
+// Tout marquer comme lu pour un utilisateur
+// Body: { userId }
+app.post("/notifications/mark-all-read", bodyParser.json(), async (req, res) => {
+  try {
+    const { userId } = req.body || {};
+    if (!userId) return res.status(400).json({ error: "userId requis" });
+
+    const { error } = await supabase
+      .from("notifications")
+      .update({ is_read: true, read_at: new Date().toISOString() })
+      .eq("user_id", userId)
+      .eq("is_read", false);
+    if (error) throw new Error(error.message);
+
+    res.json({ success: true });
+  } catch (e) {
+    console.error("❌ POST /notifications/mark-all-read:", e);
+    res.status(500).json({ error: e?.message || "Erreur interne" });
+  }
+});
+
+// Aliases /api
+app.get("/api/notifications", (req, res, next) => {
+  console.log("🔁 Alias activé : /api/notifications → /notifications");
+  req.url = "/notifications";
+  app._router.handle(req, res, next);
+});
+
+app.post("/api/notifications/mark-read", (req, res, next) => {
+  console.log("🔁 Alias activé : /api/notifications/mark-read → /notifications/mark-read");
+  req.url = "/notifications/mark-read";
+  app._router.handle(req, res, next);
+});
+
+app.post("/api/notifications/mark-all-read", (req, res, next) => {
+  console.log("🔁 Alias activé : /api/notifications/mark-all-read → /notifications/mark-all-read");
+  req.url = "/notifications/mark-all-read";
+  app._router.handle(req, res, next);
+});
+
+// ============================================================
 // 4️⃣ Activation du plan gratuit
 // ============================================================
 
