@@ -153,7 +153,13 @@ router.post("/supabase-notification", async (req, res) => {
             payload
           );
           sent++;
-        } catch (_) {}
+        } catch (err) {
+          console.error("webhook_push_error", {
+            status: err?.statusCode,
+            code: err?.code,
+            message: err?.message,
+          });
+        }
       }
     }
 
@@ -165,53 +171,3 @@ router.post("/supabase-notification", async (req, res) => {
 
 export default router;
 
-router.get("/push/health", (req, res) => {
-  let supabaseUrlHost = null;
-  try {
-    if (process.env.SUPABASE_URL) {
-      const u = new URL(process.env.SUPABASE_URL);
-      supabaseUrlHost = u.host;
-    }
-  } catch {}
-  res.json({
-    provider: NOTIF_PROVIDER,
-    vapidConfigured: Boolean(VAPID_PUBLIC_KEY && VAPID_PRIVATE_KEY),
-    publicKeyPrefix: VAPID_PUBLIC_KEY ? VAPID_PUBLIC_KEY.slice(0, 12) : null,
-    supabaseUrlHost,
-  });
-});
-
-router.get("/push/count/:userId", async (req, res) => {
-  try {
-    const userId = req.params.userId;
-    const { data, error } = await supabase
-      .from("push_subscriptions")
-      .select("endpoint")
-      .eq("user_id", userId);
-    if (error) return res.status(500).json({ error: error.message });
-    res.json({ userId, count: Array.isArray(data) ? data.length : 0 });
-  } catch (e) {
-    res.status(500).json({ error: e?.message || "Erreur" });
-  }
-});
-
-router.get("/push/sample/:userId", async (req, res) => {
-  try {
-    const userId = req.params.userId;
-    const { data, error } = await supabase
-      .from("push_subscriptions")
-      .select("endpoint")
-      .eq("user_id", userId)
-      .limit(3);
-    if (error) return res.status(500).json({ error: error.message });
-    const masked = Array.isArray(data)
-      ? data.map((r) => {
-          const ep = r.endpoint || "";
-          return ep.length > 20 ? ep.slice(0, 10) + "..." + ep.slice(-6) : ep;
-        })
-      : [];
-    res.json({ userId, sample: masked, rawCountHint: Array.isArray(data) ? data.length : 0 });
-  } catch (e) {
-    res.status(500).json({ error: e?.message || "Erreur" });
-  }
-});
