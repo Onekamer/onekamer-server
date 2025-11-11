@@ -433,6 +433,39 @@ app.post("/webhook", bodyParser.raw({ type: "application/json" }), async (req, r
   }
 });
 
+// Désinscription de l'appareil courant (suppression par endpoint)
+app.post("/push/unsubscribe", bodyParser.json(), async (req, res) => {
+  if (NOTIF_PROVIDER !== "supabase_light") return res.status(200).json({ ignored: true });
+
+  try {
+    const { endpoint, userId } = req.body || {};
+    if (!endpoint) return res.status(400).json({ error: "endpoint requis" });
+
+    const { error, count } = await supabase
+      .from("push_subscriptions")
+      .delete()
+      .eq("endpoint", endpoint)
+      .select("id", { count: "exact" });
+    if (error) {
+      console.error("❌ Erreur delete subscription:", error.message);
+      return res.status(500).json({ error: "Erreur suppression subscription" });
+    }
+
+    await logEvent({
+      category: "notifications",
+      action: "push.unsubscribe",
+      status: "success",
+      userId: userId || null,
+      context: { endpoint, deleted: count ?? 0 },
+    });
+
+    res.json({ success: true, deleted: count ?? 0 });
+  } catch (e) {
+    console.error("❌ Erreur /push/unsubscribe:", e);
+    res.status(500).json({ error: e?.message || "Erreur interne" });
+  }
+});
+
 // ============================================================
 // 2️⃣ Création de session Stripe - OK COINS
 // ============================================================
@@ -645,7 +678,7 @@ app.post("/create-subscription-session", async (req, res) => {
 // ============================================================
 
 // Enregistrement abonnement Web Push
-app.post("/push/subscribe", async (req, res) => {
+app.post("/push/subscribe", bodyParser.json(), async (req, res) => {
   if (NOTIF_PROVIDER !== "supabase_light") return res.status(200).json({ ignored: true });
 
   try {
@@ -760,6 +793,13 @@ app.post("/api/supabase-notification", (req, res, next) => {
 app.post("/notifications/onesignal", (req, res, next) => {
   console.log("🔁 Alias activé : /notifications/onesignal → /api/push/relay");
   req.url = "/api/push/relay";
+  app._router.handle(req, res, next);
+});
+
+// Alias désinscription
+app.post("/api/push/unsubscribe", (req, res, next) => {
+  console.log("🔁 Alias activé : /api/push/unsubscribe → /push/unsubscribe");
+  req.url = "/push/unsubscribe";
   app._router.handle(req, res, next);
 });
 
