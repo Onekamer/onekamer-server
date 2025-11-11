@@ -15,6 +15,7 @@ const supabase = createClient(
 // ⚙️ Variables OneSignal
 const ONESIGNAL_APP_ID = process.env.ONESIGNAL_APP_ID;
 const ONESIGNAL_API_KEY = process.env.ONESIGNAL_API_KEY;
+const NOTIF_PROVIDER = process.env.NOTIFICATIONS_PROVIDER || "onesignal";
 
 // ============================================================
 // 🔧 Fonction utilitaire : récupère une image (Supabase + BunnyCDN)
@@ -81,6 +82,9 @@ async function getImageForNotification(type, contentId) {
 // 🔔 1️⃣ ROUTE DIRECTE OneSignal (stable & manuelle)
 // --------------------------------------------------
 router.post("/notifications/onesignal", async (req, res) => {
+  if (NOTIF_PROVIDER !== "onesignal") {
+    return res.status(200).json({ ignored: true, provider: NOTIF_PROVIDER });
+  }
   try {
     const { title, message, target, url, image } = req.body;
 
@@ -125,6 +129,9 @@ router.post("/notifications/onesignal", async (req, res) => {
 // 🔔 2️⃣ ROUTE AUTOMATIQUE SUPABASE → ONESIGNAL
 // --------------------------------------------------
 router.post("/supabase-notification", async (req, res) => {
+  if (NOTIF_PROVIDER !== "onesignal") {
+    return res.status(200).json({ ignored: true, provider: NOTIF_PROVIDER });
+  }
   try {
     const { record, type } = req.body;
 
@@ -187,6 +194,9 @@ router.post("/supabase-notification", async (req, res) => {
 // 🔔 3️⃣ ROUTE DE TEST MANUELLE (Postman / terminal)
 // --------------------------------------------------
 router.post("/test-push", async (req, res) => {
+  if (NOTIF_PROVIDER !== "onesignal") {
+    return res.status(200).json({ ignored: true, provider: NOTIF_PROVIDER });
+  }
   const { user_id, title, message, link, image } = req.body;
 
   if (!user_id) return res.status(400).json({ error: "user_id requis" });
