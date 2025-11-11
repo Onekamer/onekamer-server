@@ -176,12 +176,12 @@ router.get("/push/health", (req, res) => {
 router.get("/push/count/:userId", async (req, res) => {
   try {
     const userId = req.params.userId;
-    const { data: subs, error } = await supabase
+    const { count, error } = await supabase
       .from("push_subscriptions")
-      .select("endpoint", { count: "exact", head: true })
+      .select("*", { count: "exact", head: true })
       .eq("user_id", userId);
     if (error) return res.status(500).json({ error: error.message });
-    res.json({ userId, count: subs ? subs.length : 0 });
+    res.json({ userId, count: count ?? 0 });
   } catch (e) {
     res.status(500).json({ error: e?.message || "Erreur" });
   }
