@@ -48,7 +48,13 @@ router.post("/push/send", async (req, res) => {
             payload(s.user_id)
           );
           sent++;
-        } catch (_) {}
+        } catch (err) {
+          console.error("webpush_send_error", {
+            status: err?.statusCode,
+            code: err?.code,
+            message: err?.message,
+          });
+        }
       }
     }
 
@@ -89,7 +95,13 @@ router.post("/push/relay", async (req, res) => {
             payload
           );
           sent++;
-        } catch (_) {}
+        } catch (err) {
+          console.error("webpush_relay_error", {
+            status: err?.statusCode,
+            code: err?.code,
+            message: err?.message,
+          });
+        }
       }
     }
 
@@ -152,3 +164,25 @@ router.post("/supabase-notification", async (req, res) => {
 });
 
 export default router;
+
+router.get("/push/health", (req, res) => {
+  res.json({
+    provider: NOTIF_PROVIDER,
+    vapidConfigured: Boolean(VAPID_PUBLIC_KEY && VAPID_PRIVATE_KEY),
+    publicKeyPrefix: VAPID_PUBLIC_KEY ? VAPID_PUBLIC_KEY.slice(0, 12) : null,
+  });
+});
+
+router.get("/push/count/:userId", async (req, res) => {
+  try {
+    const userId = req.params.userId;
+    const { data: subs, error } = await supabase
+      .from("push_subscriptions")
+      .select("endpoint", { count: "exact", head: true })
+      .eq("user_id", userId);
+    if (error) return res.status(500).json({ error: error.message });
+    res.json({ userId, count: subs ? subs.length : 0 });
+  } catch (e) {
+    res.status(500).json({ error: e?.message || "Erreur" });
+  }
+});
