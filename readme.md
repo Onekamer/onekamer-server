@@ -60,8 +60,6 @@ PORT=10000
 
 ## 🧰 Commandes utiles
 
-### Commandes utiles
-
 # Installation des dépendances
 npm install
 
