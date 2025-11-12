@@ -744,7 +744,7 @@ app.post("/notifications/dispatch", async (req, res) => {
     if (subErr) console.warn("⚠️ Lecture subscriptions échouée:", subErr.message);
 
     const icon = "https://onekamer-media-cdn.b-cdn.net/logo/IMG_0885%202.PNG";
-    const badge = "https://onekamer-media-cdn.b-cdn.net/favicon-32x32.png";
+    const badge = "https://onekamer-media-cdn.b-cdn.net/android-chrome-72x72.png";
     const payload = (uid) => JSON.stringify({ title: title || "OneKamer", body: message, icon, badge, url, data });
 
     let sent = 0;
