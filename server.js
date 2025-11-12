@@ -790,18 +790,198 @@ app.post("/api/supabase-notification", (req, res, next) => {
   app._router.handle(req, res, next);
 });
 
-app.post("/notifications/onesignal", (req, res, next) => {
-  console.log("🔁 Alias activé : /notifications/onesignal → /api/push/relay");
-  req.url = "/api/push/relay";
-  app._router.handle(req, res, next);
-});
-
 // Alias désinscription
 app.post("/api/push/unsubscribe", (req, res, next) => {
   console.log("🔁 Alias activé : /api/push/unsubscribe → /push/unsubscribe");
   req.url = "/push/unsubscribe";
   app._router.handle(req, res, next);
 });
+
+// ============================================================
+// 👥 Groupes — Demandes d'adhésion (join-request / approve / deny)
+// ============================================================
+
+// Helper d'envoi Web Push natif à une liste d'utilisateurs
+async function notifyUsersNative({ targetUserIds = [], title = "OneKamer", message = "", url = "/", data = {} }) {
+  if (!Array.isArray(targetUserIds) || targetUserIds.length === 0) return { sent: 0 };
+  try {
+    const { data: subs, error: subErr } = await supabase
+      .from("push_subscriptions")
+      .select("user_id, endpoint, p256dh, auth")
+      .in("user_id", targetUserIds);
+    if (subErr) console.warn(" Lecture subscriptions échouée:", subErr.message);
+
+    const icon = "https://onekamer-media-cdn.b-cdn.net/logo/IMG_0885%202.PNG";
+    const badge = "https://onekamer-media-cdn.b-cdn.net/android-chrome-72x72.png";
+    const payload = JSON.stringify({ title, body: message, icon, badge, url, data });
+    let sent = 0;
+    if (Array.isArray(subs)) {
+      for (const s of subs) {
+        try {
+          await webpush.sendNotification(
+            { endpoint: s.endpoint, expirationTime: null, keys: { p256dh: s.p256dh, auth: s.auth } },
+            payload
+          );
+          sent++;
+        } catch (e) {
+          console.warn(" Échec envoi push à", s.user_id, e?.statusCode || e?.message || e);
+        }
+      }
+    }
+    return { sent };
+  } catch (e) {
+    console.warn(" notifyUsersNative error:", e?.message || e);
+    return { sent: 0 };
+  }
+}
+
+// Créer une demande d’adhésion
+app.post("/groups/:groupId/join-request", bodyParser.json(), async (req, res) => {
+  try {
+    const groupId = req.params.groupId;
+    const { requesterId } = req.body || {};
+    if (!groupId || !requesterId) return res.status(400).json({ error: "groupId et requesterId requis" });
+
+    // Vérifier groupe + fondateur
+    const { data: grp, error: gErr } = await supabase
+      .from("groupes")
+      .select("id, fondateur_id, est_prive")
+      .eq("id", groupId)
+      .maybeSingle();
+    if (gErr || !grp) return res.status(404).json({ error: "groupe introuvable" });
+
+    // Refuser si déjà membre
+    const { data: mem } = await supabase
+      .from("groupes_membres")
+      .select("id")
+      .eq("groupe_id", groupId)
+      .eq("user_id", requesterId)
+      .maybeSingle();
+    if (mem) return res.status(200).json({ alreadyMember: true });
+
+    // Upsert demande pending unique
+    const { data: existing } = await supabase
+      .from("group_join_requests")
+      .select("id, status")
+      .eq("group_id", groupId)
+      .eq("requester_id", requesterId)
+      .eq("status", "pending")
+      .maybeSingle();
+    if (existing) return res.json({ ok: true, requestId: existing.id, status: existing.status });
+
+    const { data: inserted, error: insErr } = await supabase
+      .from("group_join_requests")
+      .insert({ group_id: groupId, requester_id: requesterId, status: "pending" })
+      .select("id")
+      .single();
+    if (insErr) return res.status(500).json({ error: insErr.message });
+
+    // Notifier le fondateur
+    const founderId = grp.fondateur_id;
+    await notifyUsersNative({
+      targetUserIds: [founderId],
+      title: "Demande d'adhésion",
+      message: "Un utilisateur souhaite rejoindre votre groupe",
+      url: `${process.env.FRONTEND_URL}/groupes/${groupId}?tab=demandes`,
+      data: { type: "group_join_request", groupId, requesterId }
+    });
+
+    return res.json({ ok: true, requestId: inserted.id });
+  } catch (e) {
+    return res.status(500).json({ error: e?.message || "Erreur interne" });
+  }
+});
+
+// Approuver une demande
+app.post("/groups/requests/:requestId/approve", bodyParser.json(), async (req, res) => {
+  try {
+    const requestId = req.params.requestId;
+    const { actorId } = req.body || {};
+    if (!requestId || !actorId) return res.status(400).json({ error: "requestId et actorId requis" });
+
+    const { data: reqRow, error: rErr } = await supabase
+      .from("group_join_requests")
+      .select("id, group_id, requester_id, status")
+      .eq("id", requestId)
+      .maybeSingle();
+    if (rErr || !reqRow) return res.status(404).json({ error: "demande introuvable" });
+    if (reqRow.status !== "pending") return res.status(400).json({ error: "déjà décidé" });
+
+    const { data: grp, error: gErr } = await supabase
+      .from("groupes")
+      .select("fondateur_id")
+      .eq("id", reqRow.group_id)
+      .maybeSingle();
+    if (gErr || !grp) return res.status(404).json({ error: "groupe introuvable" });
+    if (grp.fondateur_id !== actorId) return res.status(403).json({ error: "forbidden" });
+
+    const { error: upErr } = await supabase
+      .from("group_join_requests")
+      .update({ status: "approved", decided_at: new Date().toISOString(), decided_by: actorId })
+      .eq("id", requestId);
+    if (upErr) return res.status(500).json({ error: upErr.message });
+
+    await supabase.from("groupes_membres").insert({ groupe_id: reqRow.group_id, user_id: reqRow.requester_id, is_admin: false, role: "membre" });
+
+    await notifyUsersNative({
+      targetUserIds: [reqRow.requester_id],
+      title: "Demande approuvée",
+      message: "Vous avez été ajouté au groupe",
+      url: `${process.env.FRONTEND_URL}/groupes/${reqRow.group_id}`,
+      data: { type: "group_join_result", groupId: reqRow.group_id, status: "approved" }
+    });
+    return res.json({ ok: true });
+  } catch (e) {
+    return res.status(500).json({ error: e?.message || "Erreur interne" });
+  }
+});
+
+// Refuser une demande
+app.post("/groups/requests/:requestId/deny", bodyParser.json(), async (req, res) => {
+  try {
+    const requestId = req.params.requestId;
+    const { actorId } = req.body || {};
+    if (!requestId || !actorId) return res.status(400).json({ error: "requestId et actorId requis" });
+
+    const { data: reqRow, error: rErr } = await supabase
+      .from("group_join_requests")
+      .select("id, group_id, requester_id, status")
+      .eq("id", requestId)
+      .maybeSingle();
+    if (rErr || !reqRow) return res.status(404).json({ error: "demande introuvable" });
+    if (reqRow.status !== "pending") return res.status(400).json({ error: "déjà décidé" });
+
+    const { data: grp, error: gErr } = await supabase
+      .from("groupes")
+      .select("fondateur_id")
+      .eq("id", reqRow.group_id)
+      .maybeSingle();
+    if (gErr || !grp) return res.status(404).json({ error: "groupe introuvable" });
+    if (grp.fondateur_id !== actorId) return res.status(403).json({ error: "forbidden" });
+
+    const { error: upErr } = await supabase
+      .from("group_join_requests")
+      .update({ status: "denied", decided_at: new Date().toISOString(), decided_by: actorId })
+      .eq("id", requestId);
+    if (upErr) return res.status(500).json({ error: upErr.message });
+
+    await notifyUsersNative({
+      targetUserIds: [reqRow.requester_id],
+      title: "Demande refusée",
+      message: "Votre demande a été refusée",
+      url: `${process.env.FRONTEND_URL}/groupes/${reqRow.group_id}`,
+      data: { type: "group_join_result", groupId: reqRow.group_id, status: "denied" }
+    });
+    return res.json({ ok: true });
+  } catch (e) {
+    return res.status(500).json({ error: e?.message || "Erreur interne" });
+  }
+});
+
+// Aliases /api
+app.post("/api/groups/:groupId/join-request", (req, res, next) => { req.url = `/groups/${req.params.groupId}/join-request`; app._router.handle(req, res, next); });
+app.post("/api/groups/requests/:requestId/approve", (req, res, next) => { req.url = `/groups/requests/${req.params.requestId}/approve`; app._router.handle(req, res, next); });
+app.post("/api/groups/requests/:requestId/deny", (req, res, next) => { req.url = `/groups/requests/${req.params.requestId}/deny`; app._router.handle(req, res, next); });
 
 // ============================================================
 // 📥 Notifications API (liste + lecture) — PROD
