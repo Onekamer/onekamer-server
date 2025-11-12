@@ -58,6 +58,17 @@ PORT=10000
 | `POST`  | `/webhook`                 | Webhook Stripe (paiements & abonnements)                          |
 | `GET`   | `/fix-partenaire-images`   | (Maintenance) Correction automatique des images partenaires Bunny |
 
+## 🧰 Commandes utiles
+
+### Commandes utiles
+
+# Installation des dépendances
+npm install
+
+# Lancement du serveur (production)
+npm start
+
+
 
 👨🏽‍💻 Auteurs
 Développé par William Soppo & Annaëlle Bilounga
