@@ -641,6 +641,8 @@ app.post("/create-subscription-session", async (req, res) => {
       finalPriceId = plan.stripe_price_id;
     }
 
+    const isVip = planKey === "vip";
+
     const session = await stripe.checkout.sessions.create({
       mode: "subscription",
       payment_method_types: ["card"],
@@ -649,6 +651,11 @@ app.post("/create-subscription-session", async (req, res) => {
       success_url: `${process.env.FRONTEND_URL}/success?session_id={CHECKOUT_SESSION_ID}`,
       cancel_url: `${process.env.FRONTEND_URL}/cancel`,
       metadata: { userId, planKey },
+      ...(isVip && {
+        subscription_data: {
+          trial_period_days: 30,
+        },
+      }),
     });
 
     await logEvent({
