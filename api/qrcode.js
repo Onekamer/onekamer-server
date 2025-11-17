@@ -30,11 +30,11 @@ async function verifyAdminJWT(req) {
   try {
     const { data: prof, error: pErr } = await supabase
       .from("profiles")
-      .select("is_admin, role")
+      .select("role")
       .eq("id", uid)
       .maybeSingle();
     if (pErr) return { ok: false, reason: "forbidden" };
-    const isAdmin = !!prof?.is_admin || (prof?.role === "QRcode_Verif");
+    const isAdmin = prof?.role === "admin" || prof?.role === "QRcode_Verif";
     if (!isAdmin) return { ok: false, reason: "forbidden" };
     return { ok: true, uid };
   } catch {
@@ -97,10 +97,10 @@ router.get("/qrcode/admin/me", async (req, res) => {
     const uid = userData.user.id;
     const { data: prof } = await supabase
       .from("profiles")
-      .select("is_admin, role")
+      .select("role")
       .eq("id", uid)
       .maybeSingle();
-    const isAdmin = !!prof?.is_admin || (prof?.role === "QRcode_Verif");
+    const isAdmin = prof?.role === "admin" || prof?.role === "QRcode_Verif";
     return res.json({ isAdmin: !!isAdmin });
   } catch {
     return res.json({ isAdmin: false });
