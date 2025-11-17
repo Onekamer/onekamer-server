@@ -10,6 +10,7 @@ import Stripe from "stripe";
 import bodyParser from "body-parser";
 import cors from "cors";
 import { createClient } from "@supabase/supabase-js";
+import nodemailer from "nodemailer";
 import uploadRoute from "./api/upload.js";
 import partenaireDefaultsRoute from "./api/fix-partenaire-images.js";
 import fixAnnoncesImagesRoute from "./api/fix-annonces-images.js";
@@ -47,6 +48,14 @@ app.use(
         callback(new Error("Non autorisé par CORS"));
       }
     },
+    methods: ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+    allowedHeaders: [
+      "Content-Type",
+      "Authorization",
+      "X-Requested-With",
+      "Accept",
+      "x-admin-token",
+    ],
     credentials: true,
   })
 );
@@ -69,6 +78,89 @@ const supabase = createClient(
   process.env.SUPABASE_URL,
   process.env.SUPABASE_SERVICE_ROLE_KEY
 );
+
+// ============================================================
+// 📧 Email - Brevo HTTP API (PROD) + fallback Nodemailer
+// ============================================================
+
+const smtpHost = process.env.SMTP_HOST;
+const smtpPort = process.env.SMTP_PORT ? parseInt(process.env.SMTP_PORT, 10) : 587;
+const smtpUser = process.env.SMTP_USER;
+const smtpPass = process.env.SMTP_PASS;
+const fromEmail = process.env.FROM_EMAIL || "no-reply@onekamer.co";
+
+const brevoApiKey = process.env.BREVO_API_KEY;
+const brevoApiUrl = process.env.BREVO_API_URL || "https://api.brevo.com/v3/smtp/email";
+
+let mailTransport = null;
+
+function getMailTransport() {
+  if (!mailTransport) {
+    if (!smtpHost || !smtpUser || !smtpPass) {
+      console.warn("⚠️ SMTP non configuré (HOST/USER/PASS manquants)");
+      throw new Error("SMTP non configuré côté serveur PROD");
+    }
+    console.log("📧 Initialisation transport SMTP Nodemailer", {
+      host: smtpHost,
+      port: smtpPort,
+      secure: smtpPort === 465,
+    });
+    mailTransport = nodemailer.createTransport({
+      host: smtpHost,
+      port: smtpPort,
+      secure: smtpPort === 465,
+      auth: {
+        user: smtpUser,
+        pass: smtpPass,
+      },
+      connectionTimeout: 15000,
+      socketTimeout: 15000,
+    });
+  }
+  return mailTransport;
+}
+
+async function sendEmailViaBrevo({ to, subject, text }) {
+  if (!brevoApiKey) {
+    console.warn("⚠️ BREVO_API_KEY manquant, tentative via transport SMTP Nodemailer");
+    const transport = getMailTransport();
+    await transport.sendMail({ from: fromEmail, to, subject, text });
+    return;
+  }
+
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 20000);
+
+  try {
+    const response = await fetch(brevoApiUrl, {
+      method: "POST",
+      headers: {
+        "api-key": brevoApiKey,
+        "Content-Type": "application/json",
+        accept: "application/json",
+      },
+      body: JSON.stringify({
+        sender: { email: fromEmail, name: "OneKamer" },
+        to: [{ email: to }],
+        subject,
+        textContent: text,
+      }),
+      signal: controller.signal,
+    });
+
+    if (!response.ok) {
+      const errorText = await response.text();
+      throw new Error(`Brevo API error ${response.status}: ${errorText}`);
+    }
+
+    console.log("📧 Brevo HTTP API → email envoyé à", to);
+  } catch (err) {
+    console.error("❌ Erreur Brevo HTTP API:", err.message || err);
+    throw err;
+  } finally {
+    clearTimeout(timeout);
+  }
+}
 
 // ============================================================
 // 🔎 Journalisation auto (évènements sensibles) -> public.server_logs
@@ -472,6 +564,251 @@ app.post("/push/unsubscribe", bodyParser.json(), async (req, res) => {
 
 app.use(bodyParser.json());
 app.use(bodyParser.urlencoded({ extended: true }));
+
+// ============================================================
+// 📧 Emails admin (enqueue + process + count)
+// ============================================================
+
+function assertAdmin(req) {
+  const token = req.headers["x-admin-token"];
+  if (!token || token !== process.env.ADMIN_API_TOKEN) {
+    const err = new Error("Accès refusé (admin token invalide)");
+    err.statusCode = 401;
+    throw err;
+  }
+}
+
+function buildInfoAllBody({ username, message }) {
+  const safeName = username || "membre";
+  return `Bonjour ${safeName},\n\n${message}\n\n— L'équipe OneKamer`;
+}
+
+app.options("/admin/email/enqueue-info-all-users", cors());
+app.options("/admin/email/process-jobs", cors());
+app.options("/admin/email/count-segment", cors());
+
+app.post("/admin/email/enqueue-info-all-users", cors(), async (req, res) => {
+  try {
+    assertAdmin(req);
+
+    const { subject, message, limit, emails, segment } = req.body || {};
+    if (!subject || !message) {
+      return res.status(400).json({ error: "subject et message sont requis" });
+    }
+
+    if (Array.isArray(emails) && emails.length > 0) {
+      const cleanEmails = emails
+        .map((e) => (typeof e === "string" ? e.trim() : ""))
+        .filter((e) => e.length > 0);
+
+      if (cleanEmails.length === 0) {
+        return res.json({ inserted: 0, message: "Aucune adresse email valide dans emails[]" });
+      }
+
+      const emailUsernameMap = new Map();
+      const { data: profilesByEmail, error: profilesByEmailErr } = await supabase
+        .from("profiles")
+        .select("email, username")
+        .in("email", cleanEmails);
+
+      if (profilesByEmailErr) {
+        console.error("⚠️ Erreur lecture profiles pour emails explicites:", profilesByEmailErr.message);
+      } else if (profilesByEmail && profilesByEmail.length > 0) {
+        for (const p of profilesByEmail) {
+          if (p.email) {
+            emailUsernameMap.set(p.email, p.username || null);
+          }
+        }
+      }
+
+      const rows = cleanEmails.map((email) => ({
+        status: "pending",
+        type: "info_all_users",
+        to_email: email,
+        subject,
+        template: "INFO_ALL",
+        payload: {
+          user_id: null,
+          username: emailUsernameMap.get(email) || null,
+          message,
+        },
+      }));
+
+      const { error: insertErr } = await supabase.from("email_jobs").insert(rows);
+      if (insertErr) {
+        console.error("❌ Erreur insert email_jobs (emails explicites):", insertErr.message);
+        return res.status(500).json({ error: "Erreur création jobs" });
+      }
+
+      return res.json({ inserted: rows.length, mode: "explicit_emails" });
+    }
+
+    const max = typeof limit === "number" && limit > 0 ? Math.min(limit, 1000) : 500;
+
+    let profilesQuery = supabase
+      .from("profiles")
+      .select("id, email, username, plan")
+      .not("email", "is", null);
+
+    const normalizedSegment = (segment || "all").toString().toLowerCase();
+    if (["free", "standard", "vip"].includes(normalizedSegment)) {
+      profilesQuery = profilesQuery.eq("plan", normalizedSegment);
+    }
+
+    profilesQuery = profilesQuery.limit(max);
+
+    const { data: profiles, error } = await profilesQuery;
+
+    if (error) {
+      console.error("❌ Erreur lecture profiles pour email_jobs:", error.message);
+      return res.status(500).json({ error: "Erreur lecture profils" });
+    }
+
+    if (!profiles || profiles.length === 0) {
+      return res.json({ inserted: 0, message: "Aucun profil avec email" });
+    }
+
+    const rows = profiles.map((p) => ({
+      status: "pending",
+      type: "info_all_users",
+      to_email: p.email,
+      subject,
+      template: "INFO_ALL",
+      payload: {
+        user_id: p.id,
+        username: p.username,
+        message,
+      },
+    }));
+
+    const { error: insertErr } = await supabase.from("email_jobs").insert(rows);
+    if (insertErr) {
+      console.error("❌ Erreur insert email_jobs:", insertErr.message);
+      return res.status(500).json({ error: "Erreur création jobs" });
+    }
+
+    res.json({ inserted: rows.length, mode: normalizedSegment });
+  } catch (e) {
+    const status = e.statusCode || 500;
+    console.error("❌ /admin/email/enqueue-info-all-users:", e);
+    res.status(status).json({ error: e.message || "Erreur interne" });
+  }
+});
+
+app.post("/admin/email/count-segment", cors(), async (req, res) => {
+  try {
+    assertAdmin(req);
+
+    const { segment } = req.body || {};
+    const normalizedSegment = (segment || "all").toString().toLowerCase();
+
+    let profilesQuery = supabase
+      .from("profiles")
+      .select("id", { count: "exact", head: true })
+      .not("email", "is", null);
+
+    if (["free", "standard", "vip"].includes(normalizedSegment)) {
+      profilesQuery = profilesQuery.eq("plan", normalizedSegment);
+    }
+
+    const { count, error } = await profilesQuery;
+
+    if (error) {
+      console.error("❌ /admin/email/count-segment:", error.message);
+      return res.status(500).json({ error: "Erreur lecture profils" });
+    }
+
+    res.json({ segment: normalizedSegment, count: count || 0 });
+  } catch (e) {
+    const status = e.statusCode || 500;
+    console.error("❌ /admin/email/count-segment (handler):", e);
+    res.status(status).json({ error: e.message || "Erreur interne" });
+  }
+});
+
+app.post("/admin/email/process-jobs", cors(), async (req, res) => {
+  try {
+    assertAdmin(req);
+
+    const { limit } = req.body || {};
+    const max = typeof limit === "number" && limit > 0 ? Math.min(limit, 100) : 50;
+
+    const { data: jobs, error } = await supabase
+      .from("email_jobs")
+      .select("id, to_email, subject, template, payload")
+      .eq("status", "pending")
+      .order("created_at", { ascending: true })
+      .limit(max);
+
+    if (error) {
+      console.error("❌ Erreur lecture email_jobs:", error.message);
+      return res.status(500).json({ error: "Erreur lecture jobs" });
+    }
+
+    if (!jobs || jobs.length === 0) {
+      return res.json({ processed: 0, message: "Aucun job pending" });
+    }
+
+    console.log("📧 /admin/email/process-jobs → récupération", jobs.length, "jobs pending");
+
+    let sentCount = 0;
+    const errors = [];
+
+    for (const job of jobs) {
+      try {
+        let textBody = "";
+        if (job.template === "INFO_ALL") {
+          textBody = buildInfoAllBody({
+            username: job.payload?.username,
+            message: job.payload?.message,
+          });
+        } else {
+          textBody = job.payload?.message || "";
+        }
+
+        console.log("📧 Envoi email job", job.id, "→", job.to_email);
+
+        await sendEmailViaBrevo({
+          to: job.to_email,
+          subject: job.subject,
+          text: textBody,
+        });
+
+        console.log("✅ Email envoyé job", job.id);
+
+        sentCount += 1;
+
+        await supabase
+          .from("email_jobs")
+          .update({ status: "sent", updated_at: new Date().toISOString() })
+          .eq("id", job.id);
+      } catch (err) {
+        console.error("❌ Erreur envoi email pour job", job.id, ":", err.message);
+        errors.push({ id: job.id, error: err.message });
+        await supabase
+          .from("email_jobs")
+          .update({
+            status: "failed",
+            updated_at: new Date().toISOString(),
+            error_message: err.message,
+          })
+          .eq("id", job.id);
+      }
+    }
+
+    console.log("📧 /admin/email/process-jobs terminé →", {
+      processed: jobs.length,
+      sent: sentCount,
+      errorsCount: errors.length,
+    });
+
+    res.json({ processed: jobs.length, sent: sentCount, errors });
+  } catch (e) {
+    const status = e.statusCode || 500;
+    console.error("❌ /admin/email/process-jobs:", e);
+    res.status(status).json({ error: e.message || "Erreur interne" });
+  }
+});
 
 // ============================================================
 // Expiration automatique des QR Codes (horaire)
