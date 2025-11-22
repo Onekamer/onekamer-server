@@ -1528,7 +1528,7 @@ app.post("/notify-withdrawal", async (req, res) => {
   if (!userId || !username || !email || !amount) {
     await logEvent({
       category: "withdrawal",
-      action: "telegram.notify",
+      action: "email.notify",
       status: "error",
       userId: userId || null,
       context: { reason: "missing fields", body: req.body },
@@ -1537,51 +1537,48 @@ app.post("/notify-withdrawal", async (req, res) => {
   }
 
   try {
-    const message = `
-💸 *Nouvelle demande de retrait OK COINS*  
-👤 Utilisateur : ${username}  
-📧 Email : ${email}  
-🆔 ID : ${userId}  
-💰 Montant demandé : ${Number(amount).toLocaleString("fr-FR")} pièces  
-🕒 ${new Date().toLocaleString("fr-FR")}
-`;
+    const numericAmount = Number(amount);
+    const safeAmount = Number.isFinite(numericAmount) ? numericAmount : 0;
+    const withdrawalEmail = process.env.WITHDRAWAL_ALERT_EMAIL || "contact@onekamer.co";
 
-    const response = await fetch(
-      `https://api.telegram.org/bot${process.env.TELEGRAM_BOT_TOKEN}/sendMessage`,
-      {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          chat_id: process.env.TELEGRAM_CHAT_ID,
-          text: message,
-          parse_mode: "Markdown",
-        }),
-      }
-    );
+    const text = [
+      "Nouvelle demande de retrait OK COINS",
+      "",
+      `Utilisateur : ${username}`,
+      `Email : ${email}`,
+      `ID utilisateur : ${userId}`,
+      `Montant demandé : ${safeAmount.toLocaleString("fr-FR")} pièces`,
+      `Date : ${new Date().toLocaleString("fr-FR")}`,
+      "",
+      "— Notification automatique OneKamer.co",
+    ].join("\n");
 
-    const data = await response.json();
-    if (!data.ok) throw new Error(data.description || "Erreur API Telegram");
+    await sendEmailViaBrevo({
+      to: withdrawalEmail,
+      subject: "Nouvelle demande de retrait OK COINS",
+      text,
+    });
 
-    console.log("📨 Notification Telegram envoyée avec succès.");
+    console.log("📧 Notification retrait OK COINS envoyée par email.");
     await logEvent({
       category: "withdrawal",
-      action: "telegram.notify",
+      action: "email.notify",
       status: "success",
       userId,
-      context: { telegram_message_id: data?.result?.message_id || null },
+      context: { to: withdrawalEmail, amount: safeAmount },
     });
 
     res.json({ success: true });
   } catch (err) {
-    console.error("❌ Erreur notification Telegram :", err);
+    console.error("❌ Erreur notification retrait par email :", err);
     await logEvent({
       category: "withdrawal",
-      action: "telegram.notify",
+      action: "email.notify",
       status: "error",
       userId,
       context: { error: err?.message || err },
     });
-    res.status(500).json({ error: "Échec notification Telegram" });
+    res.status(500).json({ error: "Échec notification email" });
   }
 });
 
