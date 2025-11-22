@@ -212,8 +212,6 @@ async function logEvent({ category, action, status, userId = null, context = {} 
 //    - Envoie vers /api/push/send pour tous les profils admin
 // ============================================================
 
-const NOTIF_PROVIDER = process.env.NOTIFICATIONS_PROVIDER || "onesignal";
-
 async function sendAdminWithdrawalPush(req, { username, amount }) {
   if (NOTIF_PROVIDER !== "supabase_light") return;
 
