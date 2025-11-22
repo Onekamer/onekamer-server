@@ -207,6 +207,96 @@ async function logEvent({ category, action, status, userId = null, context = {} 
 }
 
 // ============================================================
+// 🔔 Notification push admin (retraits) via système natif
+//    - Utilise NOTIFICATIONS_PROVIDER = 'supabase_light'
+//    - Envoie vers /api/push/send pour tous les profils admin
+// ============================================================
+
+const NOTIF_PROVIDER = process.env.NOTIFICATIONS_PROVIDER || "onesignal";
+
+async function sendAdminWithdrawalPush(req, { username, amount }) {
+  if (NOTIF_PROVIDER !== "supabase_light") return;
+
+  try {
+    const { data: admins, error } = await supabase
+      .from("profiles")
+      .select("id")
+      .or("role.eq.admin,is_admin.is.true");
+
+    if (error) {
+      console.warn("⚠️ Erreur lecture profils admin pour push retrait:", error.message);
+      await logEvent({
+        category: "withdrawal",
+        action: "push.notify",
+        status: "error",
+        context: { stage: "fetch_admins", error: error.message },
+      });
+      return;
+    }
+
+    if (!admins || admins.length === 0) {
+      await logEvent({
+        category: "withdrawal",
+        action: "push.notify",
+        status: "info",
+        context: { note: "no_admins_found" },
+      });
+      return;
+    }
+
+    const targetUserIds = admins.map((a) => a.id).filter(Boolean);
+    if (targetUserIds.length === 0) return;
+
+    const baseUrl = `${req.protocol}://${req.get("host")}`;
+
+    const safeName = username || "Un membre";
+    const title = "Nouvelle demande de retrait OK COINS";
+    const message = `${safeName} a demandé un retrait de ${amount.toLocaleString("fr-FR")} pièces.`;
+
+    const response = await fetch(`${baseUrl}/api/push/send`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        title,
+        message,
+        targetUserIds,
+        url: "https://onekamer.co/okcoins",
+        data: { type: "okcoins_withdrawal" },
+      }),
+    });
+
+    const data = await response.json().catch(() => null);
+
+    if (!response.ok) {
+      await logEvent({
+        category: "withdrawal",
+        action: "push.notify",
+        status: "error",
+        context: { stage: "push_send", status: response.status, body: data },
+      });
+      return;
+    }
+
+    await logEvent({
+      category: "withdrawal",
+      action: "push.notify",
+      status: "success",
+      context: { sent: data?.sent ?? null, target_count: targetUserIds.length },
+    });
+  } catch (e) {
+    console.warn("⚠️ Erreur sendAdminWithdrawalPush:", e?.message || e);
+    await logEvent({
+      category: "withdrawal",
+      action: "push.notify",
+      status: "error",
+      context: { stage: "exception", error: e?.message || String(e) },
+    });
+  }
+}
+
+// ============================================================
 // 1️⃣ Webhook Stripe (OK COINS + Abonnements)
 // ============================================================
 
@@ -1567,6 +1657,9 @@ app.post("/notify-withdrawal", async (req, res) => {
       userId,
       context: { to: withdrawalEmail, amount: safeAmount },
     });
+
+    // 🔔 Notification push admin (système natif supabase_light)
+    await sendAdminWithdrawalPush(req, { username, amount: safeAmount });
 
     res.json({ success: true });
   } catch (err) {
