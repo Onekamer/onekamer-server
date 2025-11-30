@@ -1431,7 +1431,7 @@ app.get("/notifications", async (req, res) => {
 
     let query = supabase
       .from("notifications")
-      .select("id, created_at, title, message, type, link, is_read")
+      .select("id, created_at, title, message, type, link, is_read, content_id")
       .eq("user_id", userId)
       .order("created_at", { ascending: false })
       .limit(limit + 1);
@@ -1462,6 +1462,7 @@ app.get("/notifications", async (req, res) => {
         body: n.message,
         type: n.type,
         deeplink: n.link || "/",
+        contentId: n.content_id || null,
         is_read: !!n.is_read,
       })) || [],
       nextCursor,
