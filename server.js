@@ -1447,7 +1447,7 @@ app.get("/notifications", async (req, res) => {
     const items = hasMore ? data.slice(0, limit) : data || [];
     const nextCursor = hasMore ? items[items.length - 1]?.created_at : null;
 
-    const { data: cntData, error: cntErr } = await supabase
+    const { count: unreadCount, error: cntErr } = await supabase
       .from("notifications")
       .select("id", { count: "exact", head: true })
       .eq("user_id", userId)
@@ -1466,7 +1466,7 @@ app.get("/notifications", async (req, res) => {
       })) || [],
       nextCursor,
       hasMore,
-      unreadCount: cntData === null ? 0 : (cntData?.length ?? 0),
+      unreadCount: typeof unreadCount === "number" ? unreadCount : 0,
     });
   } catch (e) {
     console.error("❌ GET /notifications:", e);
