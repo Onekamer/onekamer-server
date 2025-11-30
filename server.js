@@ -1483,7 +1483,7 @@ app.post("/notifications/mark-read", bodyParser.json(), async (req, res) => {
 
     const { error } = await supabase
       .from("notifications")
-      .update({ is_read: true, read_at: new Date().toISOString() })
+      .update({ is_read: true })
       .eq("id", id)
       .eq("user_id", userId);
     if (error) throw new Error(error.message);
@@ -1504,7 +1504,7 @@ app.post("/notifications/mark-all-read", bodyParser.json(), async (req, res) => 
 
     const { error } = await supabase
       .from("notifications")
-      .update({ is_read: true, read_at: new Date().toISOString() })
+      .update({ is_read: true })
       .eq("user_id", userId)
       .eq("is_read", false);
     if (error) throw new Error(error.message);
