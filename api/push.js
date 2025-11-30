@@ -21,10 +21,11 @@ try {
   }
 } catch {}
 
-// Envoi push direct (sans insert DB)
+// Envoi push direct (et enregistrement dans public.notifications)
 router.post("/push/send", async (req, res) => {
   if (NOTIF_PROVIDER !== "supabase_light") return res.status(200).json({ ignored: true });
-  if (!VAPID_PUBLIC_KEY || !VAPID_PRIVATE_KEY) return res.status(200).json({ success: false, reason: "vapid_not_configured" });
+  if (!VAPID_PUBLIC_KEY || !VAPID_PRIVATE_KEY)
+    return res.status(200).json({ success: false, reason: "vapid_not_configured" });
   try {
     const { title, message, targetUserIds = [], data = {}, url = "/" } = req.body || {};
     if (!title || !message || !Array.isArray(targetUserIds) || targetUserIds.length === 0) {
@@ -56,6 +57,42 @@ router.post("/push/send", async (req, res) => {
           });
         }
       }
+    }
+
+    // Enregistre une entrée dans public.notifications pour chaque utilisateur ciblé
+    try {
+      const uniqueUserIds = Array.isArray(targetUserIds)
+        ? Array.from(new Set(targetUserIds.filter(Boolean)))
+        : [];
+
+      if (uniqueUserIds.length > 0) {
+        const notifType = (data && (data.type || data.notificationType)) || "systeme";
+        const contentId = data && (data.contentId || data.content_id) ? data.contentId || data.content_id : null;
+        const senderId = data && (data.senderId || data.sender_id) ? data.senderId || data.sender_id : null;
+
+        for (const userId of uniqueUserIds) {
+          try {
+            await supabase.rpc("create_notification", {
+              p_user_id: userId,
+              p_sender_id: senderId,
+              p_type: notifType,
+              p_content_id: contentId,
+              p_title: title,
+              p_message: message,
+              p_link: url || "/",
+            });
+          } catch (err) {
+            console.error("notification_persist_error", {
+              user_id: userId,
+              message: err?.message,
+            });
+          }
+        }
+      }
+    } catch (err) {
+      console.error("notification_persist_wrapper_error", {
+        message: err?.message,
+      });
     }
 
     res.json({ success: true, sent });
