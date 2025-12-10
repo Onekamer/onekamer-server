@@ -973,7 +973,104 @@ app.post("/admin/email/process-jobs", cors(), async (req, res) => {
 // 9️⃣ Influenceurs & Codes promo (PROD)
 //    - Vue admin : stats globales via view_influenceurs_promo_stats
 //    - Vue influenceur : stats perso via user_id
-// Expiration automatique des QR Codes (horaire)
+// ============================================================
+
+app.get("/admin/influenceurs-promo", cors(), async (req, res) => {
+  try {
+    assertAdmin(req);
+
+    const { data, error } = await supabase
+      .from("view_influenceurs_promo_stats")
+      .select("*")
+      .order("nom_public", { ascending: true });
+
+    if (error) {
+      console.error("❌ Erreur lecture view_influenceurs_promo_stats:", error.message);
+      return res.status(500).json({ error: "Erreur lecture des stats influenceurs" });
+    }
+
+    res.json({ items: data || [] });
+  } catch (e) {
+    const status = e.statusCode || 500;
+    console.error("❌ /admin/influenceurs-promo (handler):", e);
+    res.status(status).json({ error: e.message || "Erreur interne" });
+  }
+});
+
+app.patch("/admin/influenceurs-promo/:promoCodeId", cors(), async (req, res) => {
+  try {
+    assertAdmin(req);
+
+    const promoCodeId = req.params.promoCodeId;
+    const { actif, date_debut, date_fin, ok_coins_bonus, stripe_promotion_code_id } = req.body || {};
+
+    if (!promoCodeId) {
+      return res.status(400).json({ error: "promoCodeId requis" });
+    }
+
+    const updatePayload = {};
+    if (typeof actif === "boolean") updatePayload.actif = actif;
+    if (date_debut !== undefined) updatePayload.date_debut = date_debut;
+    if (date_fin !== undefined) updatePayload.date_fin = date_fin;
+    if (ok_coins_bonus !== undefined) updatePayload.ok_coins_bonus = ok_coins_bonus;
+    if (stripe_promotion_code_id !== undefined) updatePayload.stripe_promotion_code_id = stripe_promotion_code_id;
+
+    if (Object.keys(updatePayload).length === 0) {
+      return res.status(400).json({ error: "Aucun champ à mettre à jour" });
+    }
+
+    const { data, error } = await supabase
+      .from("promo_codes")
+      .update(updatePayload)
+      .eq("id", promoCodeId)
+      .select("*")
+      .maybeSingle();
+
+    if (error) {
+      console.error("❌ Erreur update promo_codes:", error.message);
+      return res.status(500).json({ error: "Erreur mise à jour du code promo" });
+    }
+
+    res.json({ item: data });
+  } catch (e) {
+    const status = e.statusCode || 500;
+    console.error("❌ /admin/influenceurs-promo/:promoCodeId (handler):", e);
+    res.status(status).json({ error: e.message || "Erreur interne" });
+  }
+});
+
+app.get("/influenceur/mes-stats", cors(), async (req, res) => {
+  try {
+    const userId = req.query.userId || req.body?.userId;
+    if (!userId) {
+      return res.status(400).json({ error: "userId requis" });
+    }
+
+    const { data, error } = await supabase
+      .from("view_influenceurs_promo_stats")
+      .select("*")
+      .eq("user_id", userId)
+      .maybeSingle();
+
+    if (error && error.code !== "PGRST116") {
+      console.error("❌ Erreur lecture mes-stats influenceur:", error.message);
+      return res.status(500).json({ error: "Erreur lecture des stats" });
+    }
+
+    if (!data) {
+      return res.json({ item: null });
+    }
+
+    res.json({ item: data });
+  } catch (e) {
+    const status = e.statusCode || 500;
+    console.error("❌ /influenceur/mes-stats (handler):", e);
+    res.status(status).json({ error: e.message || "Erreur interne" });
+  }
+});
+
+// ============================================================
+// 🔁 Expiration automatique des QR Codes (horaire)
 // ============================================================
 try {
   cron.schedule("0 * * * *", async () => {
