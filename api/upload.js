@@ -6,11 +6,26 @@ import { createClient } from "@supabase/supabase-js";
 const router = express.Router();
 const upload = multer();
 
-// ✅ Initialisation Supabase (pour synchroniser les fichiers "rencontres")
-const supabase = createClient(
-  process.env.SUPABASE_URL,
-  process.env.SUPABASE_SERVICE_ROLE_KEY
-);
+// ✅ Initialisation paresseuse de Supabase (pour synchroniser les fichiers "rencontres")
+// On évite de faire planter tout le serveur au démarrage si les variables d'env sont absentes.
+let supabase = null;
+
+function getSupabaseClient() {
+  if (!supabase) {
+    const url = process.env.SUPABASE_URL;
+    const serviceKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
+
+    if (!url || !serviceKey) {
+      throw new Error(
+        "SUPABASE_URL ou SUPABASE_SERVICE_ROLE_KEY manquant(e) pour la synchronisation des fichiers 'rencontres'"
+      );
+    }
+
+    supabase = createClient(url, serviceKey);
+  }
+
+  return supabase;
+}
 
 // 🟢 Route universelle d’upload vers BunnyCDN
 router.post("/upload", upload.single("file"), async (req, res) => {
@@ -111,7 +126,8 @@ router.post("/upload", upload.single("file"), async (req, res) => {
     // 🪄 Synchronisation dans Supabase pour permettre les URLs signées côté front
     if (safeFolder === "rencontres") {
       try {
-        const { error: supabaseError } = await supabase.storage
+        const supabaseClient = getSupabaseClient();
+        const { error: supabaseError } = await supabaseClient.storage
           .from("rencontres")
           .upload(uploadPath, file.buffer, {
             contentType: mimeType,
