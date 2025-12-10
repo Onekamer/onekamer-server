@@ -327,7 +327,7 @@ app.post("/webhook", bodyParser.raw({ type: "application/json" }), async (req, r
   try {
     if (event.type === "checkout.session.completed") {
       const session = event.data.object;
-      const { userId, packId, planKey } = session.metadata || {};
+      const { userId, packId, planKey, promoCode } = session.metadata || {};
 
       // Cas 1 : Achat OK COINS
       if (packId) {
@@ -384,7 +384,78 @@ app.post("/webhook", bodyParser.raw({ type: "application/json" }), async (req, r
         }
       }
 
-      // Cas 2 : Abonnement Stripe (Standard / VIP)
+      // Cas 2 : Tracking code promo influenceur (abonnements)
+      if (session.mode === "subscription" && promoCode) {
+        try {
+          const normalizedCode = String(promoCode).trim();
+          if (normalizedCode) {
+            const { data: promo, error: promoErr } = await supabase
+              .from("promo_codes")
+              .select("id, code, actif, date_debut, date_fin")
+              .eq("code", normalizedCode)
+              .maybeSingle();
+
+            if (promoErr) {
+              console.error("❌ Erreur lecture promo_codes:", promoErr);
+              await logEvent({
+                category: "promo",
+                action: "usage.lookup",
+                status: "error",
+                userId,
+                context: { promoCode: normalizedCode, error: promoErr.message },
+              });
+            } else if (promo && promo.actif !== false) {
+              const now = new Date();
+              const startOk = !promo.date_debut || new Date(promo.date_debut) <= now;
+              const endOk = !promo.date_fin || new Date(promo.date_fin) >= now;
+
+              if (startOk && endOk) {
+                const amountPaid = typeof session.amount_total === "number" ? session.amount_total : null;
+
+                const { error: usageErr } = await supabase.from("promo_code_usages").insert({
+                  promo_code_id: promo.id,
+                  user_id: userId || null,
+                  plan: planKey || null,
+                  stripe_checkout_session_id: session.id,
+                  stripe_customer_id: session.customer || null,
+                  amount_paid: amountPaid,
+                  ok_coins_granted: 0,
+                });
+
+                if (usageErr) {
+                  console.error("❌ Erreur insert promo_code_usages:", usageErr);
+                  await logEvent({
+                    category: "promo",
+                    action: "usage.insert",
+                    status: "error",
+                    userId,
+                    context: { promoCode: normalizedCode, error: usageErr.message },
+                  });
+                } else {
+                  await logEvent({
+                    category: "promo",
+                    action: "usage.insert",
+                    status: "success",
+                    userId,
+                    context: { promoCode: normalizedCode, planKey, session_id: session.id },
+                  });
+                }
+              }
+            }
+          }
+        } catch (e) {
+          console.error("❌ Exception tracking promo_code:", e?.message || e);
+          await logEvent({
+            category: "promo",
+            action: "usage.exception",
+            status: "error",
+            userId,
+            context: { promoCode, error: e?.message || String(e) },
+          });
+        }
+      }
+
+      // Cas 3 : Abonnement Stripe (Standard / VIP)
       if (session.mode === "subscription" && planKey) {
         try {
           const subscription = await stripe.subscriptions.retrieve(session.subscription);
@@ -442,7 +513,7 @@ app.post("/webhook", bodyParser.raw({ type: "application/json" }), async (req, r
         }
       }
 
-      // Cas 3 : Achat unique “VIP à vie”
+      // Cas 4 : Achat unique “VIP à vie”
       if (session.mode === "payment" && planKey === "vip_lifetime") {
         try {
           const { error: insertErr } = await supabase.from("abonnements").insert({
@@ -899,6 +970,9 @@ app.post("/admin/email/process-jobs", cors(), async (req, res) => {
 });
 
 // ============================================================
+// 9️⃣ Influenceurs & Codes promo (PROD)
+//    - Vue admin : stats globales via view_influenceurs_promo_stats
+//    - Vue influenceur : stats perso via user_id
 // Expiration automatique des QR Codes (horaire)
 // ============================================================
 try {
@@ -1031,7 +1105,7 @@ app.post("/create-checkout-session", async (req, res) => {
 // ============================================================
 
 app.post("/create-subscription-session", async (req, res) => {
-  const { userId, planKey, priceId } = req.body;
+  const { userId, planKey, priceId, promoCode } = req.body;
 
   try {
     if (!userId || !planKey) {
@@ -1046,6 +1120,7 @@ app.post("/create-subscription-session", async (req, res) => {
     }
 
     let finalPriceId = priceId;
+    let promotionCodeId = null;
 
     if (!finalPriceId) {
       const { data: plan, error: planErr } = await supabase
@@ -1068,6 +1143,56 @@ app.post("/create-subscription-session", async (req, res) => {
 
     const isVip = planKey === "vip";
 
+    if (promoCode) {
+      try {
+        const normalizedCode = String(promoCode).trim();
+        if (normalizedCode) {
+          const { data: promo, error: promoErr } = await supabase
+            .from("promo_codes")
+            .select("id, code, stripe_promotion_code_id, actif, date_debut, date_fin")
+            .eq("code", normalizedCode)
+            .maybeSingle();
+
+          if (promoErr) {
+            await logEvent({
+              category: "promo",
+              action: "checkout.lookup",
+              status: "error",
+              userId,
+              context: { promoCode: normalizedCode, error: promoErr.message },
+            });
+            return res.status(400).json({ error: "Code promo invalide" });
+          }
+
+          if (!promo || promo.actif === false) {
+            return res.status(400).json({ error: "Code promo inactif ou introuvable" });
+          }
+
+          const now = new Date();
+          const startOk = !promo.date_debut || new Date(promo.date_debut) <= now;
+          const endOk = !promo.date_fin || new Date(promo.date_fin) >= now;
+
+          if (!startOk || !endOk) {
+            return res.status(400).json({ error: "Code promo expiré ou non encore valide" });
+          }
+
+          if (promo.stripe_promotion_code_id) {
+            promotionCodeId = promo.stripe_promotion_code_id;
+          }
+        }
+      } catch (e) {
+        console.error("❌ Erreur validation promoCode:", e?.message || e);
+        await logEvent({
+          category: "promo",
+          action: "checkout.exception",
+          status: "error",
+          userId,
+          context: { promoCode, error: e?.message || String(e) },
+        });
+        return res.status(400).json({ error: "Code promo invalide" });
+      }
+    }
+
     const session = await stripe.checkout.sessions.create({
       mode: "subscription",
       payment_method_types: ["card"],
@@ -1075,7 +1200,18 @@ app.post("/create-subscription-session", async (req, res) => {
       allow_promotion_codes: true,
       success_url: `${process.env.FRONTEND_URL}/success?session_id={CHECKOUT_SESSION_ID}`,
       cancel_url: `${process.env.FRONTEND_URL}/cancel`,
-      metadata: { userId, planKey },
+      metadata: {
+        userId,
+        planKey,
+        ...(promoCode && { promoCode: String(promoCode).trim() }),
+      },
+      ...(promotionCodeId && {
+        discounts: [
+          {
+            promotion_code: promotionCodeId,
+          },
+        ],
+      }),
       ...(isVip && {
         subscription_data: {
           trial_period_days: 30,
