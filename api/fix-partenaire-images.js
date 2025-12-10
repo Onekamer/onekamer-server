@@ -3,10 +3,26 @@ import { createClient } from "@supabase/supabase-js";
 
 const router = express.Router();
 
-const supabase = createClient(
-  process.env.SUPABASE_URL,
-  process.env.SUPABASE_SERVICE_ROLE_KEY
-);
+// ✅ Initialisation paresseuse de Supabase pour éviter de faire planter le serveur
+// si les variables d'environnement sont absentes ou mal configurées.
+let supabase = null;
+
+function getSupabaseClient() {
+  if (!supabase) {
+    const url = process.env.SUPABASE_URL;
+    const serviceKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
+
+    if (!url || !serviceKey) {
+      throw new Error(
+        "SUPABASE_URL ou SUPABASE_SERVICE_ROLE_KEY manquant(e) pour /fix-partenaire-images"
+      );
+    }
+
+    supabase = createClient(url, serviceKey);
+  }
+
+  return supabase;
+}
 
 // 🧠 Fonction utilitaire : formatage du nom en slug pour trouver l'image correspondante
 const slugify = (str) =>
@@ -20,8 +36,10 @@ const slugify = (str) =>
 // ✅ Route automatisée de correction des images manquantes
 router.get("/fix-partenaire-images", async (req, res) => {
   try {
+    const supabaseClient = getSupabaseClient();
+
     // 1️⃣ Récupération de toutes les catégories pour construire dynamiquement le mapping
-    const { data: categories, error: catError } = await supabase
+    const { data: categories, error: catError } = await supabaseClient
       .from("partenaires_categories")
       .select("id, nom");
 
@@ -39,7 +57,7 @@ router.get("/fix-partenaire-images", async (req, res) => {
     }
 
     // 3️⃣ Récupération de tous les partenaires sans image
-    const { data: partenaires, error: partenairesError } = await supabase
+    const { data: partenaires, error: partenairesError } = await supabaseClient
       .from("partenaires")
       .select(`
         id,
