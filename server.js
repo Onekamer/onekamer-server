@@ -997,6 +997,98 @@ app.get("/admin/influenceurs-promo", cors(), async (req, res) => {
   }
 });
 
+app.post("/admin/influenceurs-promo", cors(), async (req, res) => {
+  try {
+    assertAdmin(req);
+
+    const {
+      nom_public,
+      identifiant_reseau,
+      email,
+      code,
+      stripe_promotion_code_id,
+      date_debut,
+      date_fin,
+      actif,
+      ok_coins_bonus,
+    } = req.body || {};
+
+    if (!nom_public || !code || !stripe_promotion_code_id) {
+      return res.status(400).json({
+        error: "nom_public, code et stripe_promotion_code_id sont requis",
+      });
+    }
+
+    let linkedUserId = null;
+    if (email && typeof email === "string" && email.trim().length > 0) {
+      const cleanEmail = email.trim().toLowerCase();
+      const { data: profile, error: profileErr } = await supabase
+        .from("profiles")
+        .select("id, email")
+        .ilike("email", cleanEmail)
+        .maybeSingle();
+
+      if (profileErr) {
+        console.error("❌ Erreur recherche profil par email:", profileErr.message);
+        return res.status(500).json({ error: "Erreur recherche profil par email" });
+      }
+
+      if (!profile) {
+        return res.status(400).json({
+          error: "Aucun profil trouvé avec cet email",
+        });
+      }
+
+      linkedUserId = profile.id;
+    }
+
+    const { data: influenceur, error: inflErr } = await supabase
+      .from("influenceurs")
+      .insert({
+        nom_public,
+        handle: identifiant_reseau || null,
+        canal_principal: null,
+        user_id: linkedUserId,
+      })
+      .select("id")
+      .maybeSingle();
+
+    if (inflErr || !influenceur) {
+      console.error("❌ Erreur création influenceur:", inflErr?.message || inflErr);
+      return res.status(500).json({ error: "Erreur création influenceur" });
+    }
+
+    const { data: promo, error: promoErr } = await supabase
+      .from("promo_codes")
+      .insert({
+        influenceur_id: influenceur.id,
+        code,
+        stripe_promotion_code_id,
+        actif: typeof actif === "boolean" ? actif : true,
+        date_debut: date_debut || null,
+        date_fin: date_fin || null,
+        ok_coins_bonus: typeof ok_coins_bonus === "number" ? ok_coins_bonus : 0,
+      })
+      .select("id")
+      .maybeSingle();
+
+    if (promoErr || !promo) {
+      console.error("❌ Erreur création promo_codes:", promoErr?.message || promoErr);
+      return res.status(500).json({ error: "Erreur création du code promo" });
+    }
+
+    return res.json({
+      success: true,
+      message: "Influenceur et code promo créés",
+      promo_code_id: promo.id,
+    });
+  } catch (e) {
+    const status = e.statusCode || 500;
+    console.error("❌ /admin/influenceurs-promo (POST handler):", e);
+    res.status(status).json({ error: e.message || "Erreur interne" });
+  }
+});
+
 app.patch("/admin/influenceurs-promo/:promoCodeId", cors(), async (req, res) => {
   try {
     assertAdmin(req);
