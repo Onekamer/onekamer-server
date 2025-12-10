@@ -1386,7 +1386,14 @@ app.post("/create-subscription-session", async (req, res) => {
       mode: "subscription",
       payment_method_types: ["card"],
       line_items: [{ price: finalPriceId, quantity: 1 }],
-      allow_promotion_codes: true,
+      // Stripe n'autorise pas d'envoyer à la fois allow_promotion_codes et discounts.
+      // On autorise la saisie libre de codes promo UNIQUEMENT lorsqu'aucun promotionCodeId
+      // n'est déjà fourni depuis notre base (promo_codes).
+      ...(promotionCodeId
+        ? {}
+        : {
+            allow_promotion_codes: true,
+          }),
       success_url: `${process.env.FRONTEND_URL}/success?session_id={CHECKOUT_SESSION_ID}`,
       cancel_url: `${process.env.FRONTEND_URL}/cancel`,
       metadata: {
