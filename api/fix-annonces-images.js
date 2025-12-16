@@ -3,10 +3,26 @@ import { createClient } from "@supabase/supabase-js";
 
 const router = express.Router();
 
-const supabase = createClient(
-  process.env.SUPABASE_URL,
-  process.env.SUPABASE_SERVICE_ROLE_KEY
-);
+// ✅ Initialisation paresseuse de Supabase pour éviter de faire planter le serveur
+// si les variables d'environnement sont absentes ou mal configurées.
+let supabase = null;
+
+function getSupabaseClient() {
+  if (!supabase) {
+    const url = process.env.SUPABASE_URL;
+    const serviceKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
+
+    if (!url || !serviceKey) {
+      throw new Error(
+        "SUPABASE_URL ou SUPABASE_SERVICE_ROLE_KEY manquant(e) pour /fix-annonces-images"
+      );
+    }
+
+    supabase = createClient(url, serviceKey);
+  }
+
+  return supabase;
+}
 
 // 🧠 Fonction utilitaire : formatage du nom en slug pour trouver l'image correspondante
 const slugify = (str) =>
@@ -20,8 +36,10 @@ const slugify = (str) =>
 // ✅ Route automatisée pour appliquer les images par défaut aux annonces sans image
 router.get("/fix-annonces-images", async (req, res) => {
   try {
+    const supabaseClient = getSupabaseClient();
+
     // 1️⃣ Récupération de toutes les catégories d'annonces
-    const { data: categories, error: catError } = await supabase
+    const { data: categories, error: catError } = await supabaseClient
       .from("annonces_categories")
       .select("id, nom");
 
@@ -39,7 +57,7 @@ router.get("/fix-annonces-images", async (req, res) => {
     }
 
     // 3️⃣ Récupération de toutes les annonces sans image
-    const { data: annonces, error: annoncesError } = await supabase
+    const { data: annonces, error: annoncesError } = await supabaseClient
       .from("annonces")
       .select(`
         id,
@@ -64,7 +82,7 @@ router.get("/fix-annonces-images", async (req, res) => {
         defaultImages[categorieNom] ||
         `${CDN_BASE}default_annonces_autres.png`;
 
-      const { error: updateError } = await supabase
+      const { error: updateError } = await supabaseClient
         .from("annonces")
         .update({ media_url: defaultImage })
         .eq("id", annonce.id);
