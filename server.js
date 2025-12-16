@@ -852,6 +852,27 @@ app.use(bodyParser.urlencoded({ extended: true }));
 // 2bis️⃣ Création de session Stripe - Paiement Évènement (full / deposit)
 // ============================================================
 
+app.get("/api/events/:eventId", async (req, res) => {
+  const { eventId } = req.params;
+
+  try {
+    if (!eventId) return res.status(400).json({ error: "eventId requis" });
+
+    const { data: ev, error: evErr } = await supabase
+      .from("evenements")
+      .select("id, title, date, location, price_amount, currency, deposit_percent")
+      .eq("id", eventId)
+      .maybeSingle();
+    if (evErr) throw new Error(evErr.message);
+    if (!ev) return res.status(404).json({ error: "event_not_found" });
+
+    return res.json(ev);
+  } catch (e) {
+    console.error("❌ GET /api/events/:eventId:", e);
+    return res.status(500).json({ error: e?.message || "Erreur interne" });
+  }
+});
+
 app.post("/api/events/:eventId/checkout", async (req, res) => {
   const { eventId } = req.params;
 
