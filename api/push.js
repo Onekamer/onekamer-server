@@ -5,10 +5,24 @@ import webpush from "web-push";
 const router = express.Router();
 router.use(express.json());
 
-const supabase = createClient(
-  process.env.SUPABASE_URL,
-  process.env.SUPABASE_SERVICE_ROLE_KEY
-);
+// ✅ Initialisation paresseuse de Supabase pour éviter de faire planter le serveur
+// si les variables d'environnement sont absentes ou mal configurées.
+let supabase = null;
+
+function getSupabaseClient() {
+  if (!supabase) {
+    const url = process.env.SUPABASE_URL;
+    const serviceKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
+
+    if (!url || !serviceKey) {
+      throw new Error("SUPABASE_URL ou SUPABASE_SERVICE_ROLE_KEY manquant(e) pour /push");
+    }
+
+    supabase = createClient(url, serviceKey);
+  }
+
+  return supabase;
+}
 
 const NOTIF_PROVIDER = process.env.NOTIFICATIONS_PROVIDER || "onesignal";
 const VAPID_PUBLIC_KEY = process.env.VAPID_PUBLIC_KEY;
@@ -27,12 +41,13 @@ router.post("/push/send", async (req, res) => {
   if (!VAPID_PUBLIC_KEY || !VAPID_PRIVATE_KEY)
     return res.status(200).json({ success: false, reason: "vapid_not_configured" });
   try {
+    const supabaseClient = getSupabaseClient();
     const { title, message, targetUserIds = [], data = {}, url = "/" } = req.body || {};
     if (!title || !message || !Array.isArray(targetUserIds) || targetUserIds.length === 0) {
       return res.status(400).json({ error: "title, message et targetUserIds requis" });
     }
 
-    const { data: subs } = await supabase
+    const { data: subs } = await supabaseClient
       .from("push_subscriptions")
       .select("user_id, endpoint, p256dh, auth")
       .in("user_id", targetUserIds);
@@ -72,7 +87,7 @@ router.post("/push/send", async (req, res) => {
 
         for (const userId of uniqueUserIds) {
           try {
-            await supabase.rpc("create_notification", {
+            await supabaseClient.rpc("create_notification", {
               p_user_id: userId,
               p_sender_id: senderId,
               p_type: notifType,
@@ -106,6 +121,7 @@ router.post("/push/relay", async (req, res) => {
   if (NOTIF_PROVIDER !== "supabase_light") return res.status(200).json({ ignored: true });
   if (!VAPID_PUBLIC_KEY || !VAPID_PRIVATE_KEY) return res.status(200).json({ success: false, reason: "vapid_not_configured" });
   try {
+    const supabaseClient = getSupabaseClient();
     const body = req.body || {};
     const targetUserId = body.target || body.user_id || body.targetUserId;
     const title = body.title || body.headings?.en || body.heading || "OneKamer";
@@ -115,7 +131,7 @@ router.post("/push/relay", async (req, res) => {
 
     if (!targetUserId) return res.status(400).json({ error: "target requis" });
 
-    const { data: subs } = await supabase
+    const { data: subs } = await supabaseClient
       .from("push_subscriptions")
       .select("endpoint, p256dh, auth")
       .eq("user_id", targetUserId);
@@ -153,6 +169,7 @@ router.post("/supabase-notification", async (req, res) => {
   if (NOTIF_PROVIDER !== "supabase_light") return res.status(200).json({ ignored: true });
   if (!VAPID_PUBLIC_KEY || !VAPID_PRIVATE_KEY) return res.status(200).json({ success: false, reason: "vapid_not_configured" });
   try {
+    const supabaseClient = getSupabaseClient();
     const { record, type } = req.body || {};
     let targetUserId, title, message, url, data;
 
@@ -173,7 +190,7 @@ router.post("/supabase-notification", async (req, res) => {
 
     if (!targetUserId) return res.status(400).json({ error: "target requis" });
 
-    const { data: subs } = await supabase
+    const { data: subs } = await supabaseClient
       .from("push_subscriptions")
       .select("endpoint, p256dh, auth")
       .eq("user_id", targetUserId);
