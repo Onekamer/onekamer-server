@@ -216,12 +216,14 @@ router.get("/qrcode/verify", async (req, res) => {
       return res.json({ valid: false, message: `QR Code deja ${data.status}` });
     }
 
+    const payment = await getPaymentSnapshot({ eventId: data.event_id, userId: data.user_id });
+
     await supabase
       .from("event_qrcodes")
       .update({ status: "used", validated_at: new Date().toISOString() })
       .eq("id", data.id);
 
-    return res.json({ valid: true, message: "Entree validee", event: data.evenements || null });
+    return res.json({ valid: true, message: "Entree validee", event: data.evenements || null, payment });
   } catch (e) {
     return res.status(500).json({ error: e?.message || "Erreur interne" });
   }
@@ -252,12 +254,14 @@ router.get("/qrcode/verify-jwt", async (req, res) => {
       return res.json({ valid: false, message: `QR Code deja ${data.status}` });
     }
 
+    const payment = await getPaymentSnapshot({ eventId: data.event_id, userId: data.user_id });
+
     await supabase
       .from("event_qrcodes")
       .update({ status: "used", validated_at: new Date().toISOString() })
       .eq("id", data.id);
 
-    return res.json({ valid: true, message: "Entree validee", event: data.evenements || null });
+    return res.json({ valid: true, message: "Entree validee", event: data.evenements || null, payment });
   } catch (e) {
     return res.status(500).json({ error: e?.message || "Erreur interne" });
   }
