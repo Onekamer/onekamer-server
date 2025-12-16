@@ -3,10 +3,26 @@ import { createClient } from "@supabase/supabase-js";
 
 const router = express.Router();
 
-const supabase = createClient(
-  process.env.SUPABASE_URL,
-  process.env.SUPABASE_SERVICE_ROLE_KEY
-);
+// ✅ Initialisation paresseuse de Supabase pour éviter de faire planter le serveur
+// si les variables d'environnement sont absentes ou mal configurées.
+let supabase = null;
+
+function getSupabaseClient() {
+  if (!supabase) {
+    const url = process.env.SUPABASE_URL;
+    const serviceKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
+
+    if (!url || !serviceKey) {
+      throw new Error(
+        "SUPABASE_URL ou SUPABASE_SERVICE_ROLE_KEY manquant(e) pour /fix-evenements-images"
+      );
+    }
+
+    supabase = createClient(url, serviceKey);
+  }
+
+  return supabase;
+}
 
 // 🧠 Fonction utilitaire : transformer un nom en slug compatible avec BunnyCDN
 const slugify = (str) =>
@@ -20,8 +36,10 @@ const slugify = (str) =>
 // ✅ Route pour corriger les événements sans image
 router.get("/fix-evenements-images", async (req, res) => {
   try {
+    const supabaseClient = getSupabaseClient();
+
     // 1️⃣ Récupération de tous les types d'événements
-    const { data: types, error: typesError } = await supabase
+    const { data: types, error: typesError } = await supabaseClient
       .from("evenements_types")
       .select("id, nom");
 
@@ -39,7 +57,7 @@ router.get("/fix-evenements-images", async (req, res) => {
     }
 
     // 3️⃣ Récupération des événements sans image
-    const { data: evenements, error: evError } = await supabase
+    const { data: evenements, error: evError } = await supabaseClient
       .from("evenements")
       .select(`
         id,
@@ -69,7 +87,7 @@ router.get("/fix-evenements-images", async (req, res) => {
         defaultImage = `${CDN_BASE}default_evenements_table_ronde.png`;
       }
 
-      const { error: updateError } = await supabase
+      const { error: updateError } = await supabaseClient
         .from("evenements")
         .update({ media_url: defaultImage })
         .eq("id", event.id);
