@@ -11,6 +11,54 @@ const supabase = createClient(
   process.env.SUPABASE_SERVICE_ROLE_KEY
 );
 
+async function getPaymentSnapshot({ eventId, userId }) {
+  try {
+    if (!eventId || !userId) return null;
+
+    const { data: ev, error: evErr } = await supabase
+      .from("evenements")
+      .select("id, price_amount, currency")
+      .eq("id", eventId)
+      .maybeSingle();
+    if (evErr) return null;
+
+    const amountTotal = typeof ev?.price_amount === "number" ? ev.price_amount : null;
+    const currency = ev?.currency ? String(ev.currency).toLowerCase() : null;
+
+    if (!amountTotal || amountTotal <= 0 || !currency) {
+      return {
+        status: "free",
+        amount_total: amountTotal,
+        amount_paid: 0,
+        remaining: 0,
+        currency,
+      };
+    }
+
+    const { data: pay, error: payErr } = await supabase
+      .from("event_payments")
+      .select("status, amount_total, amount_paid, currency")
+      .eq("event_id", eventId)
+      .eq("user_id", userId)
+      .maybeSingle();
+    if (payErr) return null;
+
+    const paid = typeof pay?.amount_paid === "number" ? pay.amount_paid : 0;
+    const total = typeof pay?.amount_total === "number" ? pay.amount_total : amountTotal;
+    const remaining = Math.max(total - paid, 0);
+
+    return {
+      status: pay?.status || (paid >= total ? "paid" : paid > 0 ? "deposit_paid" : "unpaid"),
+      amount_total: total,
+      amount_paid: paid,
+      remaining,
+      currency: pay?.currency ? String(pay.currency).toLowerCase() : currency,
+    };
+  } catch {
+    return null;
+  }
+}
+
 function parseAdminAllowlist() {
   const raw = process.env.QR_ADMIN_USER_IDS || "";
   return raw
@@ -251,17 +299,30 @@ router.get("/qrcode/my", async (req, res) => {
 
     const { data, error } = await supabase
       .from("event_qrcodes")
-      .select("id, qrcode_value, status, created_at, validated_at, event_id, evenements:event_id(title, date, location)")
+      .select(
+        "id, qrcode_value, status, created_at, validated_at, event_id, evenements:event_id(title, date, location, price_amount, currency)"
+      )
       .eq("user_id", user_id)
       .order("created_at", { ascending: false })
       .limit(50);
 
     if (error) return res.status(500).json({ error: error.message });
 
-    if (!withImage) return res.json({ items: data || [] });
+    const baseItems = await Promise.all(
+      (data || []).map(async (row) => {
+        try {
+          const payment = await getPaymentSnapshot({ eventId: row.event_id, userId: user_id });
+          return { ...row, payment };
+        } catch {
+          return { ...row, payment: null };
+        }
+      })
+    );
+
+    if (!withImage) return res.json({ items: baseItems });
 
     const items = await Promise.all(
-      (data || []).map(async (row) => {
+      baseItems.map(async (row) => {
         try {
           const qrImage = await QRCode.toDataURL(row.qrcode_value);
           return { ...row, qrImage };
