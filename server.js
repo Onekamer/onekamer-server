@@ -886,12 +886,16 @@ async function verifyIsAdminJWT(req) {
   const userId = userData.user.id;
   const { data: prof, error: pErr } = await supabase
     .from("profiles")
-    .select("id, is_admin")
+    .select("id, is_admin, role")
     .eq("id", userId)
     .maybeSingle();
 
   if (pErr) return { ok: false, reason: "forbidden" };
-  const isAdmin = prof?.is_admin === true || prof?.is_admin === 1 || prof?.is_admin === "true";
+  const isAdmin =
+    prof?.is_admin === true ||
+    prof?.is_admin === 1 ||
+    prof?.is_admin === "true" ||
+    String(prof?.role || "").toLowerCase() === "admin";
   if (!isAdmin) return { ok: false, reason: "forbidden" };
 
   return { ok: true, userId };
