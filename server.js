@@ -1072,7 +1072,17 @@ app.post("/api/admin/moderation/warn", async (req, res) => {
       deliveryError = pushRes?.error || "push_failed";
     }
 
-    const targetEmail = String(targetProfile?.email || "").trim();
+    let targetEmail = String(targetProfile?.email || "").trim();
+    if (!targetEmail) {
+      try {
+        const sbAdmin = getSupabaseClient();
+        const { data: uData, error: uErr } = await sbAdmin.auth.admin.getUserById(targetUserId);
+        if (!uErr) {
+          targetEmail = String(uData?.user?.email || "").trim();
+        }
+      } catch {}
+    }
+
     if (targetEmail) {
       try {
         const subject = "Avertissement de modération — OneKamer";
