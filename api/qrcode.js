@@ -6,10 +6,21 @@ import { createClient } from "@supabase/supabase-js";
 const router = express.Router();
 router.use(express.json());
 
-const supabase = createClient(
-  process.env.SUPABASE_URL,
-  process.env.SUPABASE_SERVICE_ROLE_KEY
-);
+let supabaseClient = null;
+function getSupabaseClient() {
+  if (supabaseClient) return supabaseClient;
+  const url = process.env.SUPABASE_URL;
+  const key = process.env.SUPABASE_SERVICE_ROLE_KEY;
+  if (!url || !key) {
+    throw new Error("SUPABASE_URL ou SUPABASE_SERVICE_ROLE_KEY manquante");
+  }
+  supabaseClient = createClient(url, key);
+  return supabaseClient;
+}
+
+const supabase = {
+  from: (...args) => getSupabaseClient().from(...args),
+};
 
 async function getPaymentSnapshot({ eventId, userId }) {
   try {

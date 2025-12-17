@@ -3,7 +3,18 @@ import { createClient } from "@supabase/supabase-js";
 import { buffer } from "micro";
 
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY);
-const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_SERVICE_ROLE_KEY);
+
+let supabaseClient = null;
+function getSupabaseClient() {
+  if (supabaseClient) return supabaseClient;
+  const url = process.env.SUPABASE_URL;
+  const key = process.env.SUPABASE_SERVICE_ROLE_KEY;
+  if (!url || !key) {
+    throw new Error("SUPABASE_URL ou SUPABASE_SERVICE_ROLE_KEY manquante");
+  }
+  supabaseClient = createClient(url, key);
+  return supabaseClient;
+}
 
 export const config = { api: { bodyParser: false } };
 
@@ -22,6 +33,7 @@ export default async function handler(req, res) {
   }
 
   if (event.type === "checkout.session.completed") {
+    const supabase = getSupabaseClient();
     const session = event.data.object;
     const { user_id, pack_id } = session.metadata;
 
