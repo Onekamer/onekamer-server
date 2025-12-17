@@ -267,55 +267,75 @@ router.get("/admin/events/:eventId/qrcode-stats", async (req, res) => {
 
     const { data: qrs, error: qrErr } = await supabase
       .from("event_qrcodes")
-      .select("user_id")
+      .select("user_id, status")
       .eq("event_id", eventId)
-      .eq("status", "active")
+      .in("status", ["active", "used"])
       .limit(5000);
     if (qrErr) return res.status(500).json({ error: qrErr.message });
 
-    const userIds = Array.isArray(qrs) ? qrs.map((r) => r.user_id).filter(Boolean) : [];
-
-    const counts = {
-      total_active_qr: userIds.length,
-      paid: 0,
-      deposit_paid: 0,
-      unpaid: 0,
-      free: 0,
-    };
+    const activeUserIds = Array.isArray(qrs)
+      ? qrs.filter((r) => r?.status === "active").map((r) => r.user_id).filter(Boolean)
+      : [];
+    const usedUserIds = Array.isArray(qrs)
+      ? qrs.filter((r) => r?.status === "used").map((r) => r.user_id).filter(Boolean)
+      : [];
 
     const amountTotal = typeof ev?.price_amount === "number" ? ev.price_amount : 0;
     const currency = ev?.currency ? String(ev.currency).toLowerCase() : null;
     const isFree = !amountTotal || amountTotal <= 0 || !currency;
 
     if (isFree) {
-      counts.free = userIds.length;
-      return res.json({ event: ev, counts });
+      return res.json({
+        event: ev,
+        attendus: {
+          total: activeUserIds.length,
+          paid: 0,
+          deposit_paid: 0,
+          unpaid: 0,
+          free: activeUserIds.length,
+        },
+        deja_entres: {
+          total: usedUserIds.length,
+          paid: 0,
+          deposit_paid: 0,
+          unpaid: 0,
+          free: usedUserIds.length,
+        },
+      });
     }
 
-    if (userIds.length === 0) {
-      return res.json({ event: ev, counts });
-    }
-
-    const { data: pays, error: payErr } = await supabase
-      .from("event_payments")
-      .select("user_id, status")
-      .eq("event_id", eventId)
-      .in("user_id", userIds);
-    if (payErr) return res.status(500).json({ error: payErr.message });
-
+    const allUserIds = Array.from(new Set([...activeUserIds, ...usedUserIds]));
     const statusByUser = new Map();
-    (pays || []).forEach((p) => {
-      if (p?.user_id) statusByUser.set(p.user_id, String(p.status || "").toLowerCase());
-    });
 
-    for (const uid of userIds) {
-      const st = statusByUser.get(uid) || "unpaid";
-      if (st === "paid") counts.paid++;
-      else if (st === "deposit_paid") counts.deposit_paid++;
-      else counts.unpaid++;
+    if (allUserIds.length > 0) {
+      const { data: pays, error: payErr } = await supabase
+        .from("event_payments")
+        .select("user_id, status")
+        .eq("event_id", eventId)
+        .in("user_id", allUserIds);
+      if (payErr) return res.status(500).json({ error: payErr.message });
+
+      (pays || []).forEach((p) => {
+        if (p?.user_id) statusByUser.set(p.user_id, String(p.status || "").toLowerCase());
+      });
     }
 
-    return res.json({ event: ev, counts });
+    const buildCounts = (userIds) => {
+      const out = { total: userIds.length, paid: 0, deposit_paid: 0, unpaid: 0, free: 0 };
+      for (const uid of userIds) {
+        const st = statusByUser.get(uid) || "unpaid";
+        if (st === "paid") out.paid++;
+        else if (st === "deposit_paid") out.deposit_paid++;
+        else out.unpaid++;
+      }
+      return out;
+    };
+
+    return res.json({
+      event: ev,
+      attendus: buildCounts(activeUserIds),
+      deja_entres: buildCounts(usedUserIds),
+    });
   } catch (e) {
     return res.status(500).json({ error: e?.message || "Erreur interne" });
   }
