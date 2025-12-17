@@ -868,6 +868,91 @@ app.use(bodyParser.json());
 app.use(bodyParser.urlencoded({ extended: true }));
 
 // ============================================================
+// 🧹 Admin : suppression posts Échange communautaire (PROD)
+//   - JWT obligatoire (Authorization: Bearer ...)
+//   - Vérifie profiles.is_admin
+//   - Suppression via service-role (bypass RLS)
+// ============================================================
+
+async function verifyIsAdminJWT(req) {
+  const authHeader = req.headers["authorization"] || "";
+  const token = authHeader.startsWith("Bearer ") ? authHeader.slice(7) : null;
+  if (!token) return { ok: false, reason: "unauthorized" };
+
+  const supabaseAuth = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_ANON_KEY);
+  const { data: userData, error: userErr } = await supabaseAuth.auth.getUser(token);
+  if (userErr || !userData?.user) return { ok: false, reason: "invalid_token" };
+
+  const userId = userData.user.id;
+  const { data: prof, error: pErr } = await supabase
+    .from("profiles")
+    .select("id, is_admin")
+    .eq("id", userId)
+    .maybeSingle();
+
+  if (pErr) return { ok: false, reason: "forbidden" };
+  const isAdmin = prof?.is_admin === true || prof?.is_admin === 1 || prof?.is_admin === "true";
+  if (!isAdmin) return { ok: false, reason: "forbidden" };
+
+  return { ok: true, userId };
+}
+
+app.delete("/api/admin/echange/posts/:postId", async (req, res) => {
+  try {
+    const { postId } = req.params;
+    if (!postId) return res.status(400).json({ error: "postId requis" });
+
+    const verif = await verifyIsAdminJWT(req);
+    if (!verif.ok) {
+      const status = verif.reason === "forbidden" ? 403 : 401;
+      return res.status(status).json({ error: verif.reason });
+    }
+
+    await supabase.from("likes").delete().eq("content_type", "post").eq("content_id", postId);
+    await supabase.from("comments").delete().eq("content_type", "post").eq("content_id", postId);
+
+    const { error: delErr } = await supabase.from("posts").delete().eq("id", postId);
+    if (delErr) return res.status(500).json({ error: delErr.message || "Erreur suppression post" });
+
+    return res.json({ success: true });
+  } catch (e) {
+    console.error("❌ DELETE /api/admin/echange/posts/:postId:", e);
+    return res.status(500).json({ error: e?.message || "Erreur interne" });
+  }
+});
+
+app.delete("/api/admin/echange/audio/:commentId", async (req, res) => {
+  try {
+    const { commentId } = req.params;
+    if (!commentId) return res.status(400).json({ error: "commentId requis" });
+
+    const verif = await verifyIsAdminJWT(req);
+    if (!verif.ok) {
+      const status = verif.reason === "forbidden" ? 403 : 401;
+      return res.status(status).json({ error: verif.reason });
+    }
+
+    const { data: c, error: cErr } = await supabase
+      .from("comments")
+      .select("id, content_type")
+      .eq("id", commentId)
+      .maybeSingle();
+
+    if (cErr) return res.status(500).json({ error: cErr.message || "Erreur lecture commentaire" });
+    if (!c) return res.status(404).json({ error: "not_found" });
+    if (c.content_type !== "echange") return res.status(400).json({ error: "invalid_content_type" });
+
+    const { error: delErr } = await supabase.from("comments").delete().eq("id", commentId);
+    if (delErr) return res.status(500).json({ error: delErr.message || "Erreur suppression post vocal" });
+
+    return res.json({ success: true });
+  } catch (e) {
+    console.error("❌ DELETE /api/admin/echange/audio/:commentId:", e);
+    return res.status(500).json({ error: e?.message || "Erreur interne" });
+  }
+});
+
+// ============================================================
 // 2bis️⃣ Création de session Stripe - Paiement Évènement (full / deposit)
 // ============================================================
 
