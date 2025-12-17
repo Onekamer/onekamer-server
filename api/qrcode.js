@@ -259,7 +259,7 @@ router.get("/admin/events/:eventId/qrcode-stats", async (req, res) => {
 
     const { data: ev, error: evErr } = await supabase
       .from("evenements")
-      .select("id, title, date, location, price_amount, currency")
+      .select("id, title, date, location, price_amount, currency, capacity")
       .eq("id", eventId)
       .maybeSingle();
     if (evErr) return res.status(500).json({ error: evErr.message });
@@ -280,6 +280,10 @@ router.get("/admin/events/:eventId/qrcode-stats", async (req, res) => {
       ? qrs.filter((r) => r?.status === "used").map((r) => r.user_id).filter(Boolean)
       : [];
 
+    const occupied = activeUserIds.length + usedUserIds.length;
+    const capacity = typeof ev?.capacity === "number" ? ev.capacity : null;
+    const remaining = typeof capacity === "number" ? Math.max(capacity - occupied, 0) : null;
+
     const amountTotal = typeof ev?.price_amount === "number" ? ev.price_amount : 0;
     const currency = ev?.currency ? String(ev.currency).toLowerCase() : null;
     const isFree = !amountTotal || amountTotal <= 0 || !currency;
@@ -287,6 +291,9 @@ router.get("/admin/events/:eventId/qrcode-stats", async (req, res) => {
     if (isFree) {
       return res.json({
         event: ev,
+        capacity,
+        occupied,
+        remaining,
         attendus: {
           total: activeUserIds.length,
           paid: 0,
@@ -333,6 +340,9 @@ router.get("/admin/events/:eventId/qrcode-stats", async (req, res) => {
 
     return res.json({
       event: ev,
+      capacity,
+      occupied,
+      remaining,
       attendus: buildCounts(activeUserIds),
       deja_entres: buildCounts(usedUserIds),
     });
