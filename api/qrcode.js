@@ -67,6 +67,77 @@ function parseAdminAllowlist() {
     .filter((s) => s.length > 0);
 }
 
+function normalizeRole(role) {
+  return String(role || "")
+    .trim()
+    .toLowerCase();
+}
+
+async function getUserFromBearer(req) {
+  const authHeader = req.headers["authorization"] || "";
+  const token = authHeader.startsWith("Bearer ") ? authHeader.slice(7) : null;
+  if (!token) return { ok: false, reason: "unauthorized" };
+
+  const supabaseAuth = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_ANON_KEY);
+  const { data: userData, error: userErr } = await supabaseAuth.auth.getUser(token);
+  if (userErr || !userData?.user) return { ok: false, reason: "invalid_token" };
+  return { ok: true, user: userData.user };
+}
+
+async function canAccessDashboard({ userId, email }) {
+  try {
+    if (!userId) return { ok: false };
+
+    const { data: prof, error: pErr } = await supabase
+      .from("profiles")
+      .select("role, is_admin")
+      .eq("id", userId)
+      .maybeSingle();
+    if (pErr) return { ok: false };
+
+    const roleNorm = normalizeRole(prof?.role);
+    const isAdmin = prof?.is_admin === true || roleNorm === "admin";
+    const isQrVerif = roleNorm === "qrcode_verif";
+
+    if (isAdmin || isQrVerif) return { ok: true, isAdmin, isQrVerif, byEmail: false };
+
+    const em = String(email || "").trim().toLowerCase();
+    if (!em) return { ok: false, isAdmin: false, isQrVerif: false, byEmail: false };
+
+    const { data: anyAccess, error: aErr } = await supabase
+      .from("event_dashboard_access")
+      .select("id")
+      .ilike("email", em)
+      .limit(1);
+    if (aErr) return { ok: false, isAdmin: false, isQrVerif: false, byEmail: false };
+    const byEmail = Array.isArray(anyAccess) && anyAccess.length > 0;
+    return { ok: byEmail, isAdmin: false, isQrVerif: false, byEmail };
+  } catch {
+    return { ok: false };
+  }
+}
+
+async function canAccessEventDashboard({ userId, email, eventId }) {
+  try {
+    const base = await canAccessDashboard({ userId, email });
+    if (base?.ok && (base.isAdmin || base.isQrVerif)) return true;
+
+    const em = String(email || "").trim().toLowerCase();
+    if (!em || !eventId) return false;
+
+    const { data: rows, error } = await supabase
+      .from("event_dashboard_access")
+      .select("id")
+      .eq("event_id", eventId)
+      .ilike("email", em)
+      .limit(1);
+    if (error) return false;
+    return Array.isArray(rows) && rows.length > 0;
+  } catch {
+    return false;
+  }
+}
+
 async function verifyAdminJWT(req) {
   const authHeader = req.headers["authorization"] || "";
   const token = authHeader.startsWith("Bearer ") ? authHeader.slice(7) : null;
@@ -82,7 +153,8 @@ async function verifyAdminJWT(req) {
       .eq("id", uid)
       .maybeSingle();
     if (pErr) return { ok: false, reason: "forbidden" };
-    const isAdmin = prof?.role === "admin" || prof?.role === "QRcode_Verif";
+    const roleNorm = normalizeRole(prof?.role);
+    const isAdmin = roleNorm === "admin" || roleNorm === "qrcode_verif";
     if (!isAdmin) return { ok: false, reason: "forbidden" };
     return { ok: true, uid };
   } catch {
@@ -148,10 +220,104 @@ router.get("/qrcode/admin/me", async (req, res) => {
       .select("role")
       .eq("id", uid)
       .maybeSingle();
-    const isAdmin = prof?.role === "admin" || prof?.role === "QRcode_Verif";
+    const roleNorm = normalizeRole(prof?.role);
+    const isAdmin = roleNorm === "admin" || roleNorm === "qrcode_verif";
     return res.json({ isAdmin: !!isAdmin });
   } catch {
     return res.json({ isAdmin: false });
+  }
+});
+
+// Dashboard QR (admin / QRcode_verif / organisateur autorisé)
+router.get("/admin/dashboard/me", async (req, res) => {
+  try {
+    const u = await getUserFromBearer(req);
+    if (!u.ok) return res.status(200).json({ canAccess: false });
+
+    const check = await canAccessDashboard({ userId: u.user.id, email: u.user.email });
+    return res.json({
+      canAccess: !!check?.ok,
+      isAdmin: !!check?.isAdmin,
+      isQrVerif: !!check?.isQrVerif,
+      byEmail: !!check?.byEmail,
+    });
+  } catch {
+    return res.status(200).json({ canAccess: false });
+  }
+});
+
+router.get("/admin/events/:eventId/qrcode-stats", async (req, res) => {
+  try {
+    const { eventId } = req.params;
+    if (!eventId) return res.status(400).json({ error: "eventId requis" });
+
+    const u = await getUserFromBearer(req);
+    if (!u.ok) return res.status(401).json({ error: u.reason });
+
+    const allowed = await canAccessEventDashboard({ userId: u.user.id, email: u.user.email, eventId });
+    if (!allowed) return res.status(403).json({ error: "forbidden" });
+
+    const { data: ev, error: evErr } = await supabase
+      .from("evenements")
+      .select("id, title, date, location, price_amount, currency")
+      .eq("id", eventId)
+      .maybeSingle();
+    if (evErr) return res.status(500).json({ error: evErr.message });
+    if (!ev) return res.status(404).json({ error: "event_not_found" });
+
+    const { data: qrs, error: qrErr } = await supabase
+      .from("event_qrcodes")
+      .select("user_id")
+      .eq("event_id", eventId)
+      .eq("status", "active")
+      .limit(5000);
+    if (qrErr) return res.status(500).json({ error: qrErr.message });
+
+    const userIds = Array.isArray(qrs) ? qrs.map((r) => r.user_id).filter(Boolean) : [];
+
+    const counts = {
+      total_active_qr: userIds.length,
+      paid: 0,
+      deposit_paid: 0,
+      unpaid: 0,
+      free: 0,
+    };
+
+    const amountTotal = typeof ev?.price_amount === "number" ? ev.price_amount : 0;
+    const currency = ev?.currency ? String(ev.currency).toLowerCase() : null;
+    const isFree = !amountTotal || amountTotal <= 0 || !currency;
+
+    if (isFree) {
+      counts.free = userIds.length;
+      return res.json({ event: ev, counts });
+    }
+
+    if (userIds.length === 0) {
+      return res.json({ event: ev, counts });
+    }
+
+    const { data: pays, error: payErr } = await supabase
+      .from("event_payments")
+      .select("user_id, status")
+      .eq("event_id", eventId)
+      .in("user_id", userIds);
+    if (payErr) return res.status(500).json({ error: payErr.message });
+
+    const statusByUser = new Map();
+    (pays || []).forEach((p) => {
+      if (p?.user_id) statusByUser.set(p.user_id, String(p.status || "").toLowerCase());
+    });
+
+    for (const uid of userIds) {
+      const st = statusByUser.get(uid) || "unpaid";
+      if (st === "paid") counts.paid++;
+      else if (st === "deposit_paid") counts.deposit_paid++;
+      else counts.unpaid++;
+    }
+
+    return res.json({ event: ev, counts });
+  } catch (e) {
+    return res.status(500).json({ error: e?.message || "Erreur interne" });
   }
 });
 
