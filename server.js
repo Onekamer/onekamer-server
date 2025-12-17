@@ -220,8 +220,15 @@ async function logEvent({ category, action, status, userId = null, context = {} 
       console.warn("⚠️ Log insert failed:", error.message);
     }
   } catch (e) {
-    console.warn("⚠️ Log error:", e?.message || e);
+    console.warn("⚠️ Log insert exception:", e?.message || e);
   }
+}
+
+const loggedAliases = new Set();
+function logAliasOnce(message) {
+  if (loggedAliases.has(message)) return;
+  loggedAliases.add(message);
+  console.log(message);
 }
 
 // ============================================================
@@ -1820,27 +1827,27 @@ app.post("/notifications/dispatch", async (req, res) => {
 // 🔁 Aliases compatibilité pour chemins /api
 // ============================================================
 app.post("/api/push/subscribe", (req, res, next) => {
-  console.log("🔁 Alias activé : /api/push/subscribe → /push/subscribe");
+  logAliasOnce("🔁 Alias activé : /api/push/subscribe → /push/subscribe");
   req.url = "/push/subscribe";
   app._router.handle(req, res, next);
 });
 
 app.post("/api/notifications/dispatch", (req, res, next) => {
-  console.log("🔁 Alias activé : /api/notifications/dispatch → /notifications/dispatch");
+  logAliasOnce("🔁 Alias activé : /api/notifications/dispatch → /notifications/dispatch");
   req.url = "/notifications/dispatch";
   app._router.handle(req, res, next);
 });
 
 // Legacy Supabase webhook targets → route vers le nouveau relais Web Push
 app.post("/api/supabase-notification", (req, res, next) => {
-  console.log("🔁 Alias activé : /api/supabase-notification → /push/supabase-notification");
+  logAliasOnce("🔁 Alias activé : /api/supabase-notification → /push/supabase-notification");
   req.url = "/push/supabase-notification";
   app._router.handle(req, res, next);
 });
 
 // Alias désinscription
 app.post("/api/push/unsubscribe", (req, res, next) => {
-  console.log("🔁 Alias activé : /api/push/unsubscribe → /push/unsubscribe");
+  logAliasOnce("🔁 Alias activé : /api/push/unsubscribe → /push/unsubscribe");
   req.url = "/push/unsubscribe";
   app._router.handle(req, res, next);
 });
@@ -2135,19 +2142,19 @@ app.post("/notifications/mark-all-read", bodyParser.json(), async (req, res) => 
 
 // Aliases /api
 app.get("/api/notifications", (req, res, next) => {
-  console.log("🔁 Alias activé : /api/notifications → /notifications");
+  logAliasOnce("🔁 Alias activé : /api/notifications → /notifications");
   req.url = "/notifications";
   app._router.handle(req, res, next);
 });
 
 app.post("/api/notifications/mark-read", (req, res, next) => {
-  console.log("🔁 Alias activé : /api/notifications/mark-read → /notifications/mark-read");
+  logAliasOnce("🔁 Alias activé : /api/notifications/mark-read → /notifications/mark-read");
   req.url = "/notifications/mark-read";
   app._router.handle(req, res, next);
 });
 
 app.post("/api/notifications/mark-all-read", (req, res, next) => {
-  console.log("🔁 Alias activé : /api/notifications/mark-all-read → /notifications/mark-all-read");
+  logAliasOnce("🔁 Alias activé : /api/notifications/mark-all-read → /notifications/mark-all-read");
   req.url = "/notifications/mark-all-read";
   app._router.handle(req, res, next);
 });
@@ -2358,7 +2365,7 @@ console.log("✅ Route OneSignal /send-notification chargée");
 // (utilisé par le front Horizon / Codex)
 // ============================================================
 app.post("/notifications/onesignal", (req, res, next) => {
-  console.log("🔁 Alias activé : /notifications/onesignal → /send-notification");
+  logAliasOnce("🔁 Alias activé : /notifications/onesignal → /send-notification");
   req.url = "/send-notification";
   app._router.handle(req, res, next);
 });
