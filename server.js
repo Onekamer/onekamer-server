@@ -956,6 +956,196 @@ app.delete("/api/admin/echange/audio/:commentId", async (req, res) => {
   }
 });
 
+async function sendSupabaseLightPush(req, { title, message, targetUserIds, url = "/", data = {} }) {
+  if (NOTIF_PROVIDER !== "supabase_light") return { ok: false, skipped: true, reason: "provider_not_supabase_light" };
+  if (!Array.isArray(targetUserIds) || targetUserIds.length === 0) {
+    return { ok: false, skipped: true, reason: "no_targets" };
+  }
+
+  try {
+    const baseUrl = `${req.protocol}://${req.get("host")}`;
+    const response = await fetch(`${baseUrl}/api/push/send`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        title,
+        message,
+        targetUserIds,
+        url,
+        data,
+      }),
+    });
+
+    const resp = await response.json().catch(() => null);
+    if (!response.ok) {
+      return { ok: false, error: resp?.error || `push_send_failed_${response.status}` };
+    }
+    return { ok: true, sent: resp?.sent ?? null };
+  } catch (e) {
+    return { ok: false, error: e?.message || "push_send_exception" };
+  }
+}
+
+app.post("/api/admin/moderation/warn", async (req, res) => {
+  try {
+    const verif = await verifyIsAdminJWT(req);
+    if (!verif.ok) {
+      const status = verif.reason === "forbidden" ? 403 : 401;
+      return res.status(status).json({ error: verif.reason });
+    }
+
+    const { targetUserId, contentType, contentId, reason, message } = req.body || {};
+    if (!targetUserId || !contentType || !contentId || !reason || !message) {
+      return res.status(400).json({ error: "targetUserId, contentType, contentId, reason, message requis" });
+    }
+
+    const adminUserId = verif.userId;
+
+    const { data: adminProfile, error: adminErr } = await supabase
+      .from("profiles")
+      .select("id, username")
+      .eq("id", adminUserId)
+      .maybeSingle();
+    if (adminErr) return res.status(500).json({ error: adminErr.message || "Erreur lecture admin" });
+
+    const { data: targetProfile, error: targetErr } = await supabase
+      .from("profiles")
+      .select("id, username, email")
+      .eq("id", targetUserId)
+      .maybeSingle();
+    if (targetErr) return res.status(500).json({ error: targetErr.message || "Erreur lecture cible" });
+    if (!targetProfile) return res.status(404).json({ error: "target_not_found" });
+
+    const adminUsername = adminProfile?.username || "admin";
+    const targetUsername = targetProfile?.username || "Utilisateur";
+
+    const insertPayload = {
+      admin_user_id: adminUserId,
+      admin_username: adminUsername,
+      target_user_id: targetUserId,
+      target_username: targetUsername,
+      content_type: String(contentType),
+      content_id: String(contentId),
+      action_type: "warning",
+      reason: String(reason),
+      message: String(message),
+      email_sent: false,
+      notification_sent: false,
+      delivery_error: null,
+      meta: { env: "prod" },
+    };
+
+    const { data: inserted, error: insErr } = await supabase
+      .from("admin_moderation_actions")
+      .insert(insertPayload)
+      .select("id")
+      .maybeSingle();
+    if (insErr) return res.status(500).json({ error: insErr.message || "Erreur insertion historique" });
+
+    const actionId = inserted?.id;
+
+    let notifOk = false;
+    let emailOk = false;
+    let deliveryError = null;
+
+    const notifTitle = `Avertissement de modération`;
+    const notifMessage = `Motif : ${reason}\n${message}`;
+
+    const pushRes = await sendSupabaseLightPush(req, {
+      title: notifTitle,
+      message: notifMessage,
+      targetUserIds: [targetUserId],
+      url: "https://onekamer.co/echange",
+      data: {
+        type: "moderation_warning",
+        contentType,
+        contentId,
+        actionId,
+      },
+    });
+
+    if (pushRes?.ok) {
+      notifOk = true;
+    } else if (!pushRes?.skipped) {
+      deliveryError = pushRes?.error || "push_failed";
+    }
+
+    const targetEmail = String(targetProfile?.email || "").trim();
+    if (targetEmail) {
+      try {
+        const subject = "Avertissement de modération — OneKamer";
+        const text =
+          `Bonjour ${targetUsername},\n\n` +
+          `Nous vous contactons suite à un contenu publié sur OneKamer.\n\n` +
+          `Motif : ${reason}\n\n` +
+          `${message}\n\n` +
+          `— L'équipe OneKamer`;
+
+        await sendEmailViaBrevo({ to: targetEmail, subject, text });
+        emailOk = true;
+      } catch (e) {
+        const errMsg = e?.message || "email_failed";
+        deliveryError = deliveryError ? `${deliveryError} | ${errMsg}` : errMsg;
+      }
+    } else {
+      deliveryError = deliveryError ? `${deliveryError} | missing_email` : "missing_email";
+    }
+
+    if (actionId) {
+      try {
+        await supabase
+          .from("admin_moderation_actions")
+          .update({
+            email_sent: emailOk,
+            notification_sent: notifOk,
+            delivery_error: deliveryError,
+          })
+          .eq("id", actionId);
+      } catch {}
+    }
+
+    return res.json({
+      success: true,
+      actionId,
+      notification_sent: notifOk,
+      email_sent: emailOk,
+      delivery_error: deliveryError,
+    });
+  } catch (e) {
+    console.error("❌ POST /api/admin/moderation/warn:", e);
+    return res.status(500).json({ error: e?.message || "Erreur interne" });
+  }
+});
+
+app.get("/api/admin/moderation/actions", async (req, res) => {
+  try {
+    const verif = await verifyIsAdminJWT(req);
+    if (!verif.ok) {
+      const status = verif.reason === "forbidden" ? 403 : 401;
+      return res.status(status).json({ error: verif.reason });
+    }
+
+    const limitRaw = req.query.limit;
+    const limit = Math.min(Math.max(parseInt(limitRaw, 10) || 50, 1), 200);
+
+    const { data, error } = await supabase
+      .from("admin_moderation_actions")
+      .select(
+        "id, created_at, admin_user_id, admin_username, target_user_id, target_username, content_type, content_id, action_type, reason, message, email_sent, notification_sent, delivery_error"
+      )
+      .order("created_at", { ascending: false })
+      .limit(limit);
+
+    if (error) return res.status(500).json({ error: error.message || "Erreur lecture historique" });
+    return res.json({ actions: data || [] });
+  } catch (e) {
+    console.error("❌ GET /api/admin/moderation/actions:", e);
+    return res.status(500).json({ error: e?.message || "Erreur interne" });
+  }
+});
+
 // ============================================================
 // 2bis️⃣ Création de session Stripe - Paiement Évènement (full / deposit)
 // ============================================================
