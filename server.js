@@ -20,6 +20,7 @@ import pushRouter from "./api/push.js";
 import webpush from "web-push";
 import qrcodeRouter from "./api/qrcode.js";
 import cron from "node-cron";
+import { createFxService } from "./utils/fx.js";
 
 // ✅ Correction : utiliser le fetch natif de Node 18+ (pas besoin d'import)
 const fetch = globalThis.fetch;
@@ -49,7 +50,7 @@ app.use(
         callback(new Error("Non autorisé par CORS"));
       }
     },
-    methods: ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+    methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
     allowedHeaders: [
       "Content-Type",
       "Authorization",
@@ -96,6 +97,632 @@ const supabase = {
   from: (...args) => getSupabaseClient().from(...args),
   rpc: (...args) => getSupabaseClient().rpc(...args),
 };
+
+const fxService = createFxService({ supabase, fetchImpl: fetch });
+
+app.get("/api/market/fx-rate", async (req, res) => {
+  try {
+    const from = String(req.query.from || "").trim().toUpperCase();
+    const to = String(req.query.to || "").trim().toUpperCase();
+    if (!from || !to) return res.status(400).json({ error: "from et to requis" });
+
+    const rate = await fxService.getRate(from, to);
+    return res.json({ from, to, rate });
+  } catch (e) {
+    return res.status(500).json({ error: e?.message || "fx_error" });
+  }
+});
+
+function countryToCurrency(countryCode) {
+  const cc = String(countryCode || "").trim().toUpperCase();
+  if (!cc) return "EUR";
+  if (cc === "CA") return "CAD";
+  if (cc === "GB") return "GBP";
+  if (cc === "CH") return "CHF";
+  if (cc === "MA") return "MAD";
+  const euroCountries = new Set([
+    "AT",
+    "BE",
+    "CY",
+    "DE",
+    "EE",
+    "ES",
+    "FI",
+    "FR",
+    "GR",
+    "HR",
+    "IE",
+    "IT",
+    "LT",
+    "LU",
+    "LV",
+    "MT",
+    "NL",
+    "PT",
+    "SI",
+    "SK",
+  ]);
+  if (euroCountries.has(cc)) return "EUR";
+  if (cc === "US") return "USD";
+  return "USD";
+}
+
+async function requireUserJWT(req) {
+  const authHeader = req.headers["authorization"] || "";
+  const token = authHeader.startsWith("Bearer ") ? authHeader.slice(7) : null;
+  if (!token) return { ok: false, status: 401, error: "unauthorized" };
+
+  const supabaseAuth = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_ANON_KEY);
+  const { data: userData, error: userErr } = await supabaseAuth.auth.getUser(token);
+  if (userErr || !userData?.user) return { ok: false, status: 401, error: "invalid_token" };
+
+  return { ok: true, userId: userData.user.id, token };
+}
+
+async function getActiveFeeSettings(currency) {
+  const cur = String(currency || "").trim().toUpperCase();
+  const { data, error } = await supabase
+    .from("marketplace_fee_settings")
+    .select("currency, percent_bps, fixed_fee_amount")
+    .eq("currency", cur)
+    .eq("is_active", true)
+    .maybeSingle();
+  if (error || !data) return null;
+  return data;
+}
+
+async function requirePartnerOwner({ req, partnerId }) {
+  const guard = await requireUserJWT(req);
+  if (!guard.ok) return guard;
+
+  const { data: partner, error: pErr } = await supabase
+    .from("partners_market")
+    .select("id, owner_user_id, stripe_connect_account_id, payout_status")
+    .eq("id", partnerId)
+    .maybeSingle();
+
+  if (pErr) return { ok: false, status: 500, error: pErr.message || "partner_read_failed" };
+  if (!partner) return { ok: false, status: 404, error: "partner_not_found" };
+  if (partner.owner_user_id !== guard.userId) return { ok: false, status: 403, error: "forbidden" };
+  return { ok: true, userId: guard.userId, partner };
+}
+
+async function requireVipOrAdminUser({ req }) {
+  const guard = await requireUserJWT(req);
+  if (!guard.ok) return guard;
+
+  const { data: profile, error } = await supabase
+    .from("profiles")
+    .select("id, plan, role, is_admin")
+    .eq("id", guard.userId)
+    .maybeSingle();
+
+  if (error) return { ok: false, status: 500, error: error.message || "profile_read_failed" };
+  if (!profile) return { ok: false, status: 404, error: "profile_not_found" };
+
+  const plan = String(profile.plan || "free").toLowerCase();
+  const isAdmin = Boolean(profile.is_admin) || String(profile.role || "").toLowerCase() === "admin";
+  const isVip = plan === "vip";
+  if (!isAdmin && !isVip) return { ok: false, status: 403, error: "vip_required" };
+
+  return { ok: true, userId: guard.userId, token: guard.token, profile };
+}
+
+app.get("/api/market/partners", async (_req, res) => {
+  try {
+    const { data, error } = await supabase
+      .from("partners_market")
+      .select(
+        "id, display_name, description, category, country_code, base_currency, status, payout_status, is_open, logo_url, phone, whatsapp, address, hours, created_at"
+      )
+      .order("created_at", { ascending: false });
+
+    if (error) return res.status(500).json({ error: error.message || "Erreur lecture partenaires" });
+
+    const partners = (data || []).map((p) => {
+      const isApproved = String(p.status || "").toLowerCase() === "approved";
+      const payoutComplete = String(p.payout_status || "").toLowerCase() === "complete";
+      const isOpen = p.is_open === true;
+      const commandable = isApproved && payoutComplete && isOpen;
+      return { ...p, commandable };
+    });
+
+    return res.json({ partners });
+  } catch (e) {
+    return res.status(500).json({ error: e?.message || "Erreur interne" });
+  }
+});
+
+app.get("/api/market/partners/me", async (req, res) => {
+  try {
+    const guard = await requireUserJWT(req);
+    if (!guard.ok) return res.status(guard.status).json({ error: guard.error });
+
+    const { data: partner, error } = await supabase
+      .from("partners_market")
+      .select(
+        "id, owner_user_id, display_name, description, category, status, payout_status, stripe_connect_account_id, is_open, logo_url, phone, whatsapp, address, hours, created_at, updated_at"
+      )
+      .eq("owner_user_id", guard.userId)
+      .maybeSingle();
+
+    if (error) return res.status(500).json({ error: error.message || "Erreur lecture boutique" });
+    return res.json({ partner: partner || null });
+  } catch (e) {
+    return res.status(500).json({ error: e?.message || "Erreur interne" });
+  }
+});
+
+app.post("/api/market/partners", bodyParser.json(), async (req, res) => {
+  try {
+    const guard = await requireVipOrAdminUser({ req });
+    if (!guard.ok) return res.status(guard.status).json({ error: guard.error });
+
+    const { display_name, description, category, logo_url, phone, whatsapp, address, hours } = req.body || {};
+
+    const name = String(display_name || "").trim();
+    const desc = String(description || "").trim();
+    const cat = String(category || "").trim();
+    const logo = String(logo_url || "").trim();
+
+    if (!name) return res.status(400).json({ error: "display_name requis" });
+    if (!desc) return res.status(400).json({ error: "description requise" });
+    if (!cat) return res.status(400).json({ error: "category requise" });
+    if (!logo) return res.status(400).json({ error: "logo_url requis" });
+
+    const { data: existing, error: exErr } = await supabase
+      .from("partners_market")
+      .select("id")
+      .eq("owner_user_id", guard.userId)
+      .maybeSingle();
+    if (exErr) return res.status(500).json({ error: exErr.message || "Erreur lecture boutique" });
+    if (existing?.id) return res.status(409).json({ error: "partner_already_exists" });
+
+    const now = new Date().toISOString();
+    const { data: inserted, error } = await supabase
+      .from("partners_market")
+      .insert({
+        owner_user_id: guard.userId,
+        display_name: name,
+        description: desc,
+        category: cat,
+        status: "pending",
+        payout_status: "incomplete",
+        is_open: false,
+        logo_url: logo,
+        phone: phone ? String(phone).trim() : null,
+        whatsapp: whatsapp ? String(whatsapp).trim() : null,
+        address: address ? String(address).trim() : null,
+        hours: hours ? String(hours).trim() : null,
+        created_at: now,
+        updated_at: now,
+      })
+      .select("id")
+      .maybeSingle();
+
+    if (error) return res.status(500).json({ error: error.message || "Erreur création boutique" });
+    if (!inserted?.id) return res.status(500).json({ error: "partner_create_failed" });
+    return res.json({ success: true, partnerId: inserted.id });
+  } catch (e) {
+    return res.status(500).json({ error: e?.message || "Erreur interne" });
+  }
+});
+
+app.patch("/api/market/partners/:partnerId", bodyParser.json(), async (req, res) => {
+  try {
+    const { partnerId } = req.params;
+    if (!partnerId) return res.status(400).json({ error: "partnerId requis" });
+
+    const auth = await requirePartnerOwner({ req, partnerId });
+    if (!auth.ok) return res.status(auth.status).json({ error: auth.error });
+
+    const patch = req.body || {};
+    const update = {
+      updated_at: new Date().toISOString(),
+    };
+
+    if (patch.display_name !== undefined) update.display_name = String(patch.display_name || "").trim();
+    if (patch.description !== undefined) update.description = String(patch.description || "").trim();
+    if (patch.category !== undefined) update.category = String(patch.category || "").trim();
+    if (patch.logo_url !== undefined) update.logo_url = String(patch.logo_url || "").trim();
+    if (patch.phone !== undefined) update.phone = patch.phone ? String(patch.phone).trim() : null;
+    if (patch.whatsapp !== undefined) update.whatsapp = patch.whatsapp ? String(patch.whatsapp).trim() : null;
+    if (patch.address !== undefined) update.address = patch.address ? String(patch.address).trim() : null;
+    if (patch.hours !== undefined) update.hours = patch.hours ? String(patch.hours).trim() : null;
+
+    if ("display_name" in update && !update.display_name) {
+      return res.status(400).json({ error: "display_name requis" });
+    }
+    if ("description" in update && !update.description) {
+      return res.status(400).json({ error: "description requise" });
+    }
+    if ("category" in update && !update.category) {
+      return res.status(400).json({ error: "category requise" });
+    }
+    if ("logo_url" in update && !update.logo_url) {
+      return res.status(400).json({ error: "logo_url requis" });
+    }
+
+    const { error } = await supabase.from("partners_market").update(update).eq("id", partnerId);
+    if (error) return res.status(500).json({ error: error.message || "Erreur mise à jour boutique" });
+    return res.json({ success: true });
+  } catch (e) {
+    return res.status(500).json({ error: e?.message || "Erreur interne" });
+  }
+});
+
+app.get("/api/market/partners/:partnerId/items", async (req, res) => {
+  try {
+    const { partnerId } = req.params;
+    if (!partnerId) return res.status(400).json({ error: "partnerId requis" });
+
+    const { data: items, error } = await supabase
+      .from("partner_items")
+      .select("id, partner_id, type, title, description, base_price_amount, is_available, is_published, media")
+      .eq("partner_id", partnerId)
+      .eq("is_published", true)
+      .order("created_at", { ascending: false });
+
+    if (error) return res.status(500).json({ error: error.message || "Erreur lecture items" });
+    return res.json({ items: items || [] });
+  } catch (e) {
+    return res.status(500).json({ error: e?.message || "Erreur interne" });
+  }
+});
+
+app.get("/api/market/partners/:partnerId/items/manage", async (req, res) => {
+  try {
+    const { partnerId } = req.params;
+    if (!partnerId) return res.status(400).json({ error: "partnerId requis" });
+
+    const auth = await requirePartnerOwner({ req, partnerId });
+    if (!auth.ok) return res.status(auth.status).json({ error: auth.error });
+
+    const { data: items, error } = await supabase
+      .from("partner_items")
+      .select("id, partner_id, type, title, description, base_price_amount, is_available, is_published, media, created_at, updated_at")
+      .eq("partner_id", partnerId)
+      .order("created_at", { ascending: false });
+
+    if (error) return res.status(500).json({ error: error.message || "Erreur lecture items" });
+    return res.json({ items: items || [] });
+  } catch (e) {
+    return res.status(500).json({ error: e?.message || "Erreur interne" });
+  }
+});
+
+app.post("/api/market/partners/:partnerId/items", bodyParser.json(), async (req, res) => {
+  try {
+    const { partnerId } = req.params;
+    if (!partnerId) return res.status(400).json({ error: "partnerId requis" });
+
+    const auth = await requirePartnerOwner({ req, partnerId });
+    if (!auth.ok) return res.status(auth.status).json({ error: auth.error });
+
+    const payload = req.body || {};
+    const title = String(payload.title || "").trim();
+    const description = payload.description ? String(payload.description).trim() : null;
+    const type = payload.type ? String(payload.type).trim() : "product";
+
+    const basePriceAmount = Number(payload.base_price_amount);
+    if (!title) return res.status(400).json({ error: "title requis" });
+    if (!Number.isFinite(basePriceAmount) || basePriceAmount < 0) {
+      return res.status(400).json({ error: "base_price_amount invalide" });
+    }
+
+    const isAvailable = payload.is_available === false ? false : true;
+    const isPublished = payload.is_published === true;
+    const media = payload.media && typeof payload.media === "object" ? payload.media : null;
+
+    const now = new Date().toISOString();
+    const { data, error } = await supabase
+      .from("partner_items")
+      .insert({
+        partner_id: partnerId,
+        type,
+        title,
+        description,
+        base_price_amount: Math.round(basePriceAmount),
+        is_available: isAvailable,
+        is_published: isPublished,
+        media,
+        created_at: now,
+        updated_at: now,
+      })
+      .select("id")
+      .maybeSingle();
+
+    if (error) return res.status(500).json({ error: error.message || "Erreur création item" });
+    if (!data?.id) return res.status(500).json({ error: "item_create_failed" });
+    return res.json({ success: true, itemId: data.id });
+  } catch (e) {
+    return res.status(500).json({ error: e?.message || "Erreur interne" });
+  }
+});
+
+app.patch("/api/market/partners/:partnerId/items/:itemId", bodyParser.json(), async (req, res) => {
+  try {
+    const { partnerId, itemId } = req.params;
+    if (!partnerId) return res.status(400).json({ error: "partnerId requis" });
+    if (!itemId) return res.status(400).json({ error: "itemId requis" });
+
+    const auth = await requirePartnerOwner({ req, partnerId });
+    if (!auth.ok) return res.status(auth.status).json({ error: auth.error });
+
+    const patch = req.body || {};
+    const update = { updated_at: new Date().toISOString() };
+
+    if (patch.title !== undefined) update.title = String(patch.title || "").trim();
+    if (patch.description !== undefined) update.description = patch.description ? String(patch.description).trim() : null;
+    if (patch.type !== undefined) update.type = patch.type ? String(patch.type).trim() : "product";
+    if (patch.base_price_amount !== undefined) {
+      const v = Number(patch.base_price_amount);
+      if (!Number.isFinite(v) || v < 0) return res.status(400).json({ error: "base_price_amount invalide" });
+      update.base_price_amount = Math.round(v);
+    }
+    if (patch.is_available !== undefined) update.is_available = patch.is_available === true;
+    if (patch.is_published !== undefined) update.is_published = patch.is_published === true;
+    if (patch.media !== undefined) update.media = patch.media && typeof patch.media === "object" ? patch.media : null;
+
+    if ("title" in update && !update.title) return res.status(400).json({ error: "title requis" });
+
+    const { data: existing, error: readErr } = await supabase
+      .from("partner_items")
+      .select("id, partner_id")
+      .eq("id", itemId)
+      .maybeSingle();
+    if (readErr) return res.status(500).json({ error: readErr.message || "Erreur lecture item" });
+    if (!existing) return res.status(404).json({ error: "item_not_found" });
+    if (String(existing.partner_id) !== String(partnerId)) return res.status(403).json({ error: "forbidden" });
+
+    const { error } = await supabase.from("partner_items").update(update).eq("id", itemId);
+    if (error) return res.status(500).json({ error: error.message || "Erreur mise à jour item" });
+    return res.json({ success: true });
+  } catch (e) {
+    return res.status(500).json({ error: e?.message || "Erreur interne" });
+  }
+});
+
+app.delete("/api/market/partners/:partnerId/items/:itemId", async (req, res) => {
+  try {
+    const { partnerId, itemId } = req.params;
+    if (!partnerId) return res.status(400).json({ error: "partnerId requis" });
+    if (!itemId) return res.status(400).json({ error: "itemId requis" });
+
+    const auth = await requirePartnerOwner({ req, partnerId });
+    if (!auth.ok) return res.status(auth.status).json({ error: auth.error });
+
+    const { data: existing, error: readErr } = await supabase
+      .from("partner_items")
+      .select("id, partner_id")
+      .eq("id", itemId)
+      .maybeSingle();
+    if (readErr) return res.status(500).json({ error: readErr.message || "Erreur lecture item" });
+    if (!existing) return res.status(404).json({ error: "item_not_found" });
+    if (String(existing.partner_id) !== String(partnerId)) return res.status(403).json({ error: "forbidden" });
+
+    const { error } = await supabase.from("partner_items").delete().eq("id", itemId);
+    if (error) return res.status(500).json({ error: error.message || "Erreur suppression item" });
+    return res.json({ success: true });
+  } catch (e) {
+    return res.status(500).json({ error: e?.message || "Erreur interne" });
+  }
+});
+
+app.post("/api/market/orders", bodyParser.json(), async (req, res) => {
+  try {
+    const guard = await requireUserJWT(req);
+    if (!guard.ok) return res.status(guard.status).json({ error: guard.error });
+
+    const { partnerId, items, delivery_mode, customer_note } = req.body || {};
+    if (!partnerId || !Array.isArray(items) || items.length === 0) {
+      return res.status(400).json({ error: "partnerId et items requis" });
+    }
+
+    const { data: partner, error: pErr } = await supabase
+      .from("partners_market")
+      .select("id, status, payout_status, is_open, base_currency")
+      .eq("id", partnerId)
+      .maybeSingle();
+    if (pErr) return res.status(500).json({ error: pErr.message || "Erreur lecture partenaire" });
+    if (!partner) return res.status(404).json({ error: "partner_not_found" });
+
+    const baseCurrency = String(partner.base_currency || "").trim().toUpperCase();
+    if (!baseCurrency) return res.status(400).json({ error: "partner_base_currency_missing" });
+
+    const { data: prof, error: profErr } = await supabase
+      .from("profiles")
+      .select("country_code")
+      .eq("id", guard.userId)
+      .maybeSingle();
+    if (profErr) return res.status(500).json({ error: profErr.message || "Erreur lecture profil" });
+
+    const customerCountryCode = String(prof?.country_code || "").trim().toUpperCase() || null;
+    const chargeCurrency = countryToCurrency(customerCountryCode);
+
+    const itemIds = items
+      .map((it) => String(it?.itemId || "").trim())
+      .filter(Boolean);
+    if (itemIds.length === 0) return res.status(400).json({ error: "items_invalid" });
+
+    const { data: dbItems, error: iErr } = await supabase
+      .from("partner_items")
+      .select("id, partner_id, title, base_price_amount, is_available, is_published")
+      .eq("partner_id", partnerId)
+      .in("id", itemIds);
+    if (iErr) return res.status(500).json({ error: iErr.message || "Erreur lecture items" });
+
+    const byId = new Map((dbItems || []).map((x) => [x.id, x]));
+    const orderLines = [];
+    let baseTotal = 0;
+
+    for (const it of items) {
+      const id = String(it?.itemId || "").trim();
+      const qty = Math.max(parseInt(it?.quantity, 10) || 1, 1);
+      const row = byId.get(id);
+      if (!row) return res.status(400).json({ error: `item_not_found:${id}` });
+      if (!row.is_published) return res.status(400).json({ error: `item_not_published:${id}` });
+      if (!row.is_available) return res.status(400).json({ error: `item_unavailable:${id}` });
+      const unit = Number(row.base_price_amount);
+      if (!Number.isFinite(unit) || unit < 0) return res.status(400).json({ error: `item_price_invalid:${id}` });
+      const lineTotal = unit * qty;
+      baseTotal += lineTotal;
+      orderLines.push({
+        item_id: row.id,
+        title_snapshot: row.title,
+        unit_base_price_amount: unit,
+        quantity: qty,
+        total_base_amount: lineTotal,
+      });
+    }
+
+    const { amount: chargeTotal, rate } = await fxService.convertMinorAmount({
+      amount: baseTotal,
+      fromCurrency: baseCurrency,
+      toCurrency: chargeCurrency,
+    });
+
+    const fee = await getActiveFeeSettings(chargeCurrency);
+    if (!fee) return res.status(400).json({ error: "fee_settings_missing" });
+
+    const percentFee = Math.round((chargeTotal * Number(fee.percent_bps || 0)) / 10000);
+    const fixedFee = Number(fee.fixed_fee_amount || 0);
+    const platformFee = Math.max(percentFee + fixedFee, 0);
+    const partnerAmount = Math.max(chargeTotal - platformFee, 0);
+
+    const { data: inserted, error: oErr } = await supabase
+      .from("partner_orders")
+      .insert({
+        partner_id: partnerId,
+        customer_user_id: guard.userId,
+        status: "created",
+        delivery_mode: delivery_mode === "partner_delivery" ? "partner_delivery" : "pickup",
+        customer_note: customer_note ? String(customer_note) : null,
+        customer_country_code: customerCountryCode,
+        base_currency: baseCurrency,
+        base_amount_total: baseTotal,
+        charge_currency: chargeCurrency,
+        charge_amount_total: chargeTotal,
+        fx_rate_used: rate,
+        fx_provider: "frankfurter",
+        fx_timestamp: new Date().toISOString(),
+        platform_fee_amount: platformFee,
+        partner_amount: partnerAmount,
+      })
+      .select("id")
+      .maybeSingle();
+    if (oErr) return res.status(500).json({ error: oErr.message || "Erreur création commande" });
+
+    const orderId = inserted?.id;
+    if (!orderId) return res.status(500).json({ error: "order_create_failed" });
+
+    const linesPayload = orderLines.map((l) => ({ ...l, order_id: orderId }));
+    const { error: liErr } = await supabase.from("partner_order_items").insert(linesPayload);
+    if (liErr) return res.status(500).json({ error: liErr.message || "Erreur création lignes" });
+
+    return res.json({ success: true, orderId });
+  } catch (e) {
+    return res.status(500).json({ error: e?.message || "Erreur interne" });
+  }
+});
+
+app.post("/api/market/orders/:orderId/checkout", bodyParser.json(), async (req, res) => {
+  try {
+    const guard = await requireUserJWT(req);
+    if (!guard.ok) return res.status(guard.status).json({ error: guard.error });
+
+    const { orderId } = req.params;
+    if (!orderId) return res.status(400).json({ error: "orderId requis" });
+
+    const { data: order, error: oErr } = await supabase
+      .from("partner_orders")
+      .select("id, partner_id, customer_user_id, status, charge_currency, charge_amount_total, platform_fee_amount")
+      .eq("id", orderId)
+      .maybeSingle();
+    if (oErr) return res.status(500).json({ error: oErr.message || "Erreur lecture commande" });
+    if (!order) return res.status(404).json({ error: "order_not_found" });
+    if (order.customer_user_id !== guard.userId) return res.status(403).json({ error: "forbidden" });
+    if (!["created", "payment_pending"].includes(String(order.status || ""))) {
+      return res.status(400).json({ error: "order_status_invalid" });
+    }
+
+    const { data: partner, error: pErr } = await supabase
+      .from("partners_market")
+      .select("id, status, payout_status, is_open, stripe_connect_account_id")
+      .eq("id", order.partner_id)
+      .maybeSingle();
+    if (pErr) return res.status(500).json({ error: pErr.message || "Erreur lecture partenaire" });
+    if (!partner) return res.status(404).json({ error: "partner_not_found" });
+
+    const isApproved = String(partner.status || "").toLowerCase() === "approved";
+    const payoutComplete = String(partner.payout_status || "").toLowerCase() === "complete";
+    const isOpen = partner.is_open === true;
+    if (!(isApproved && payoutComplete && isOpen)) {
+      return res.status(400).json({ error: "partner_not_commandable" });
+    }
+
+    const currency = String(order.charge_currency || "").toLowerCase();
+    const unitAmount = Number(order.charge_amount_total);
+    if (!currency || !Number.isFinite(unitAmount) || unitAmount <= 0) {
+      return res.status(400).json({ error: "order_amount_invalid" });
+    }
+
+    const destinationAccount = partner?.stripe_connect_account_id
+      ? String(partner.stripe_connect_account_id)
+      : null;
+    if (!destinationAccount) {
+      return res.status(400).json({ error: "partner_connect_account_missing" });
+    }
+
+    const applicationFeeAmount = Number(order.platform_fee_amount);
+    if (!Number.isFinite(applicationFeeAmount) || applicationFeeAmount < 0) {
+      return res.status(400).json({ error: "order_fee_invalid" });
+    }
+    if (applicationFeeAmount > unitAmount) {
+      return res.status(400).json({ error: "order_fee_too_high" });
+    }
+
+    const frontendBase = String(process.env.FRONTEND_URL || "").replace(/\/$/, "");
+    if (!frontendBase) return res.status(500).json({ error: "FRONTEND_URL manquant" });
+
+    const sessionStripe = await stripe.checkout.sessions.create({
+      payment_method_types: ["card"],
+      payment_intent_data: {
+        application_fee_amount: applicationFeeAmount,
+        transfer_data: { destination: destinationAccount },
+      },
+      line_items: [
+        {
+          price_data: {
+            currency,
+            product_data: { name: "Commande Partenaire — OneKamer" },
+            unit_amount: unitAmount,
+          },
+          quantity: 1,
+        },
+      ],
+      mode: "payment",
+      success_url: `${frontendBase}/paiement-success?session_id={CHECKOUT_SESSION_ID}`,
+      cancel_url: `${frontendBase}/paiement-annule`,
+      metadata: { market_order_id: orderId, partner_id: order.partner_id, customer_user_id: guard.userId },
+    });
+
+    await supabase.from("partner_order_payments").insert({
+      order_id: orderId,
+      stripe_checkout_session_id: sessionStripe.id,
+      status: "created",
+    });
+
+    await supabase
+      .from("partner_orders")
+      .update({ status: "payment_pending" })
+      .eq("id", orderId);
+
+    return res.json({ success: true, url: sessionStripe.url });
+  } catch (e) {
+    return res.status(500).json({ error: e?.message || "Erreur interne" });
+  }
+});
 
 // ============================================================
 // 📧 Email - Brevo HTTP API (PROD) + fallback Nodemailer
