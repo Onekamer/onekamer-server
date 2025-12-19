@@ -428,6 +428,145 @@ app.get("/api/market/partners/me", async (req, res) => {
   }
 });
 
+app.get("/api/admin/market/partners", async (req, res) => {
+  try {
+    const verif = await verifyIsAdminJWT(req);
+    if (!verif.ok) {
+      const status = verif.reason === "forbidden" ? 403 : 401;
+      return res.status(status).json({ error: verif.reason });
+    }
+
+    const statusFilter = req.query.status ? String(req.query.status).trim().toLowerCase() : "";
+    const search = req.query.search ? String(req.query.search).trim() : "";
+    const limitRaw = req.query.limit;
+    const offsetRaw = req.query.offset;
+    const limit = Math.min(Math.max(parseInt(limitRaw, 10) || 50, 1), 200);
+    const offset = Math.max(parseInt(offsetRaw, 10) || 0, 0);
+
+    let q = supabase
+      .from("partners_market")
+      .select(
+        "id, owner_user_id, display_name, category, base_currency, status, payout_status, is_open, logo_url, created_at, updated_at",
+        { count: "exact" }
+      )
+      .order("created_at", { ascending: false });
+
+    if (statusFilter && ["pending", "approved", "rejected"].includes(statusFilter)) {
+      q = q.eq("status", statusFilter);
+    }
+
+    if (search) {
+      q = q.ilike("display_name", `%${search}%`);
+    }
+
+    const { data: rows, error, count } = await q.range(offset, offset + limit - 1);
+    if (error) return res.status(500).json({ error: error.message || "Erreur lecture boutiques" });
+
+    const ownerIds = Array.isArray(rows)
+      ? Array.from(new Set(rows.map((r) => r?.owner_user_id).filter(Boolean)))
+      : [];
+
+    const ownersById = new Map();
+    if (ownerIds.length > 0) {
+      const { data: owners, error: oErr } = await supabase.from("profiles").select("id, username, email").in("id", ownerIds);
+      if (!oErr && Array.isArray(owners)) {
+        owners.forEach((o) => ownersById.set(o.id, o));
+      }
+    }
+
+    const partners = (rows || []).map((p) => {
+      const owner = ownersById.get(p.owner_user_id) || null;
+      return {
+        ...p,
+        owner_username: owner?.username || null,
+        owner_email: owner?.email || null,
+      };
+    });
+
+    return res.json({ partners, count: typeof count === "number" ? count : null, limit, offset });
+  } catch (e) {
+    return res.status(500).json({ error: e?.message || "Erreur interne" });
+  }
+});
+
+app.patch("/api/admin/market/partners/:partnerId", bodyParser.json(), async (req, res) => {
+  try {
+    const { partnerId } = req.params;
+    if (!partnerId) return res.status(400).json({ error: "partnerId requis" });
+
+    const verif = await verifyIsAdminJWT(req);
+    if (!verif.ok) {
+      const status = verif.reason === "forbidden" ? 403 : 401;
+      return res.status(status).json({ error: verif.reason });
+    }
+
+    const patch = req.body || {};
+    const update = {
+      updated_at: new Date().toISOString(),
+    };
+
+    if (patch.status !== undefined) {
+      const st = String(patch.status || "").trim().toLowerCase();
+      if (!["pending", "approved", "rejected"].includes(st)) {
+        return res.status(400).json({ error: "invalid_status" });
+      }
+      update.status = st;
+    }
+
+    if (patch.is_open !== undefined) {
+      update.is_open = patch.is_open === true;
+    }
+
+    if (Object.keys(update).length === 1) {
+      return res.status(400).json({ error: "nothing_to_update" });
+    }
+
+    const { error } = await supabase.from("partners_market").update(update).eq("id", partnerId);
+    if (error) return res.status(500).json({ error: error.message || "Erreur mise à jour boutique" });
+    return res.json({ success: true });
+  } catch (e) {
+    return res.status(500).json({ error: e?.message || "Erreur interne" });
+  }
+});
+
+app.delete("/api/admin/market/partners/:partnerId", async (req, res) => {
+  try {
+    const { partnerId } = req.params;
+    if (!partnerId) return res.status(400).json({ error: "partnerId requis" });
+
+    const verif = await verifyIsAdminJWT(req);
+    if (!verif.ok) {
+      const status = verif.reason === "forbidden" ? 403 : 401;
+      return res.status(status).json({ error: verif.reason });
+    }
+
+    const { data: orders, error: oErr } = await supabase.from("partner_orders").select("id").eq("partner_id", partnerId).limit(5000);
+    if (oErr) return res.status(500).json({ error: oErr.message || "Erreur lecture commandes" });
+
+    const orderIds = Array.isArray(orders) ? orders.map((o) => o.id).filter(Boolean) : [];
+    if (orderIds.length > 0) {
+      const { error: delOrderItemsErr } = await supabase.from("partner_order_items").delete().in("order_id", orderIds);
+      if (delOrderItemsErr) return res.status(500).json({ error: delOrderItemsErr.message || "Erreur suppression lignes commande" });
+
+      const { error: delOrderPaysErr } = await supabase.from("partner_order_payments").delete().in("order_id", orderIds);
+      if (delOrderPaysErr) return res.status(500).json({ error: delOrderPaysErr.message || "Erreur suppression paiements commande" });
+
+      const { error: delOrdersErr } = await supabase.from("partner_orders").delete().in("id", orderIds);
+      if (delOrdersErr) return res.status(500).json({ error: delOrdersErr.message || "Erreur suppression commandes" });
+    }
+
+    const { error: delItemsErr } = await supabase.from("partner_items").delete().eq("partner_id", partnerId);
+    if (delItemsErr) return res.status(500).json({ error: delItemsErr.message || "Erreur suppression produits" });
+
+    const { error: delPartnerErr } = await supabase.from("partners_market").delete().eq("id", partnerId);
+    if (delPartnerErr) return res.status(500).json({ error: delPartnerErr.message || "Erreur suppression boutique" });
+
+    return res.json({ success: true });
+  } catch (e) {
+    return res.status(500).json({ error: e?.message || "Erreur interne" });
+  }
+});
+
 app.post("/api/market/partners", bodyParser.json(), async (req, res) => {
   try {
     const guard = await requireVipOrAdminUser({ req });
