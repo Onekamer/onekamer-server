@@ -461,6 +461,7 @@ app.post("/api/market/partners", bodyParser.json(), async (req, res) => {
         display_name: name,
         description: desc,
         category: cat,
+        base_currency: "EUR",
         status: "pending",
         payout_status: "incomplete",
         is_open: false,
