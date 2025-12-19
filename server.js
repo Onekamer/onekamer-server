@@ -841,6 +841,179 @@ app.delete("/api/admin/market/partners/:partnerId", async (req, res) => {
   }
 });
 
+app.get("/api/admin/market/partners/performance", async (req, res) => {
+  try {
+    const verif = await verifyIsAdminJWT(req);
+    if (!verif.ok) {
+      const status = verif.reason === "forbidden" ? 403 : 401;
+      return res.status(status).json({ error: verif.reason });
+    }
+
+    const period = req.query.period ? String(req.query.period).trim().toLowerCase() : "30d";
+    const currencyFilter = req.query.currency ? String(req.query.currency).trim().toUpperCase() : "ALL";
+    const search = req.query.search ? String(req.query.search).trim() : "";
+    const includeEmpty =
+      req.query.includeEmpty === true ||
+      req.query.includeEmpty === "true" ||
+      req.query.includeEmpty === "1";
+
+    const limitRaw = req.query.limit;
+    const offsetRaw = req.query.offset;
+    const limit = Math.min(Math.max(parseInt(limitRaw, 10) || 50, 1), 200);
+    const offset = Math.max(parseInt(offsetRaw, 10) || 0, 0);
+
+    const now = Date.now();
+    const daysByPeriod = { "7d": 7, "30d": 30, "90d": 90, "365d": 365 };
+    const days = daysByPeriod[period] || null;
+    const sinceIso = days ? new Date(now - days * 24 * 60 * 60 * 1000).toISOString() : null;
+
+    const maxRows = 10000;
+    const pageSize = 1000;
+    let fetched = 0;
+    let pageOffset = 0;
+    let paidOrders = [];
+
+    while (fetched < maxRows) {
+      let q = supabase
+        .from("partner_orders")
+        .select("id, partner_id, status, charge_currency, charge_amount_total, updated_at, created_at")
+        .eq("status", "paid")
+        .order("created_at", { ascending: false })
+        .range(pageOffset, pageOffset + pageSize - 1);
+
+      if (sinceIso) q = q.gte("created_at", sinceIso);
+      if (currencyFilter && currencyFilter !== "ALL") q = q.eq("charge_currency", currencyFilter);
+
+      const { data, error } = await q;
+      if (error) return res.status(500).json({ error: error.message || "Erreur lecture commandes" });
+
+      const rows = Array.isArray(data) ? data : [];
+      if (rows.length === 0) break;
+      paidOrders = paidOrders.concat(rows);
+      fetched += rows.length;
+      if (rows.length < pageSize) break;
+      pageOffset += pageSize;
+    }
+
+    const statsByKey = new Map();
+    const partnerIds = new Set();
+
+    paidOrders.forEach((o) => {
+      const pid = o?.partner_id ? String(o.partner_id) : null;
+      const cur = o?.charge_currency ? String(o.charge_currency).toUpperCase() : null;
+      const amt = Number(o?.charge_amount_total || 0);
+      if (!pid || !cur || !Number.isFinite(amt)) return;
+
+      partnerIds.add(pid);
+      const key = `${pid}::${cur}`;
+      const existing = statsByKey.get(key) || {
+        partner_id: pid,
+        currency: cur,
+        orders_paid_count: 0,
+        revenue_charge_total_minor: 0,
+        last_paid_at: null,
+      };
+
+      existing.orders_paid_count += 1;
+      existing.revenue_charge_total_minor += amt;
+
+      const ts = o?.updated_at || o?.created_at || null;
+      if (ts && (!existing.last_paid_at || String(ts) > String(existing.last_paid_at))) {
+        existing.last_paid_at = ts;
+      }
+
+      statsByKey.set(key, existing);
+    });
+
+    const partnerIdList = Array.from(partnerIds);
+    const partnerById = new Map();
+    if (partnerIdList.length > 0) {
+      const { data: partners, error: pErr } = await supabase
+        .from("partners_market")
+        .select("id, display_name, base_currency")
+        .in("id", partnerIdList);
+      if (pErr) return res.status(500).json({ error: pErr.message || "Erreur lecture boutiques" });
+      (partners || []).forEach((p) => partnerById.set(String(p.id), p));
+    }
+
+    let allPartnersById = null;
+    if (includeEmpty) {
+      let pq = supabase.from("partners_market").select("id, display_name, base_currency, created_at");
+      if (search) pq = pq.ilike("display_name", `%${search}%`);
+      const { data: allPartners, error: apErr } = await pq.order("created_at", { ascending: false }).limit(2000);
+      if (apErr) return res.status(500).json({ error: apErr.message || "Erreur lecture boutiques" });
+      allPartnersById = new Map();
+      (allPartners || []).forEach((p) => allPartnersById.set(String(p.id), p));
+    }
+
+    let rows = Array.from(statsByKey.values()).map((r) => {
+      const p = partnerById.get(String(r.partner_id)) || null;
+      const avg = r.orders_paid_count > 0 ? Math.round(r.revenue_charge_total_minor / r.orders_paid_count) : 0;
+      return {
+        ...r,
+        avg_basket_minor: avg,
+        partner_display_name: p?.display_name || null,
+        partner_base_currency: p?.base_currency || null,
+      };
+    });
+
+    if (search) {
+      const searchLower = search.toLowerCase();
+      rows = rows.filter((r) => String(r.partner_display_name || "").toLowerCase().includes(searchLower));
+    }
+
+    if (includeEmpty && allPartnersById) {
+      allPartnersById.forEach((p) => {
+        const pid = String(p.id);
+
+        if (currencyFilter && currencyFilter !== "ALL") {
+          const key = `${pid}::${currencyFilter}`;
+          if (!statsByKey.has(key)) {
+            rows.push({
+              partner_id: pid,
+              currency: currencyFilter,
+              orders_paid_count: 0,
+              revenue_charge_total_minor: 0,
+              last_paid_at: null,
+              avg_basket_minor: 0,
+              partner_display_name: p.display_name || null,
+              partner_base_currency: p.base_currency || null,
+            });
+          }
+          return;
+        }
+
+        const baseCur = p.base_currency ? String(p.base_currency).toUpperCase() : "";
+        const cur = baseCur || "EUR";
+        const exists = rows.some((r) => String(r.partner_id) === pid);
+        if (!exists) {
+          rows.push({
+            partner_id: pid,
+            currency: cur,
+            orders_paid_count: 0,
+            revenue_charge_total_minor: 0,
+            last_paid_at: null,
+            avg_basket_minor: 0,
+            partner_display_name: p.display_name || null,
+            partner_base_currency: p.base_currency || null,
+          });
+        }
+      });
+    }
+
+    rows.sort((a, b) => {
+      const da = Number(a.revenue_charge_total_minor || 0);
+      const db = Number(b.revenue_charge_total_minor || 0);
+      return db - da;
+    });
+
+    const paged = rows.slice(offset, offset + limit);
+    return res.json({ rows: paged, count: rows.length, limit, offset, period, currency: currencyFilter });
+  } catch (e) {
+    return res.status(500).json({ error: e?.message || "Erreur interne" });
+  }
+});
+
 app.post("/api/market/partners", bodyParser.json(), async (req, res) => {
   try {
     const guard = await requireVipOrAdminUser({ req });
