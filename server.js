@@ -146,12 +146,51 @@ app.post("/api/partner/connect/onboarding-link", bodyParser.json(), async (req, 
     const returnUrl = `${frontendBase}/compte`;
     const refreshUrl = `${frontendBase}/compte`;
 
-    const link = await stripe.accountLinks.create({
-      account: accountId,
-      refresh_url: refreshUrl,
-      return_url: returnUrl,
-      type: "account_onboarding",
-    });
+    let link;
+    try {
+      link = await stripe.accountLinks.create({
+        account: accountId,
+        refresh_url: refreshUrl,
+        return_url: returnUrl,
+        type: "account_onboarding",
+      });
+    } catch (e) {
+      if (!isStripeMissingAccountError(e)) throw e;
+
+      await supabase
+        .from("partners_market")
+        .update({
+          stripe_connect_account_id: null,
+          payout_status: "incomplete",
+          updated_at: new Date().toISOString(),
+        })
+        .eq("id", partnerId);
+
+      const account = await stripe.accounts.create({
+        type: "express",
+        capabilities: {
+          card_payments: { requested: true },
+          transfers: { requested: true },
+        },
+      });
+
+      accountId = account.id;
+      await supabase
+        .from("partners_market")
+        .update({
+          stripe_connect_account_id: accountId,
+          payout_status: "incomplete",
+          updated_at: new Date().toISOString(),
+        })
+        .eq("id", partnerId);
+
+      link = await stripe.accountLinks.create({
+        account: accountId,
+        refresh_url: refreshUrl,
+        return_url: returnUrl,
+        type: "account_onboarding",
+      });
+    }
 
     return res.json({ url: link.url, accountId });
   } catch (e) {
@@ -170,7 +209,27 @@ app.post("/api/partner/connect/sync-status", bodyParser.json(), async (req, res)
     const accountId = auth.partner?.stripe_connect_account_id ? String(auth.partner.stripe_connect_account_id) : null;
     if (!accountId) return res.status(400).json({ error: "stripe_connect_account_id manquant" });
 
-    const account = await stripe.accounts.retrieve(accountId);
+    let account;
+    try {
+      account = await stripe.accounts.retrieve(accountId);
+    } catch (e) {
+      if (!isStripeMissingAccountError(e)) throw e;
+      await supabase
+        .from("partners_market")
+        .update({
+          stripe_connect_account_id: null,
+          payout_status: "incomplete",
+          updated_at: new Date().toISOString(),
+        })
+        .eq("id", partnerId);
+      return res.json({
+        ok: true,
+        payout_status: "incomplete",
+        details_submitted: false,
+        charges_enabled: false,
+        payouts_enabled: false,
+      });
+    }
 
     const detailsSubmitted = account?.details_submitted === true;
     const chargesEnabled = account?.charges_enabled === true;
@@ -274,6 +333,12 @@ async function getActiveFeeSettings(currency) {
     .maybeSingle();
   if (error || !data) return null;
   return data;
+}
+
+function isStripeMissingAccountError(err) {
+  const code = err?.code ? String(err.code) : "";
+  const msg = err?.message ? String(err.message) : "";
+  return code === "resource_missing" || /no such account/i.test(msg);
 }
 
 async function requirePartnerOwner({ req, partnerId }) {
