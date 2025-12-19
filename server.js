@@ -338,7 +338,12 @@ async function getActiveFeeSettings(currency) {
 function isStripeMissingAccountError(err) {
   const code = err?.code ? String(err.code) : "";
   const msg = err?.message ? String(err.message) : "";
-  return code === "resource_missing" || /no such account/i.test(msg);
+  return (
+    code === "resource_missing" ||
+    /no such account/i.test(msg) ||
+    /not connected to your platform/i.test(msg) ||
+    /account\s+that\s+is\s+not\s+connected\s+to\s+your\s+platform/i.test(msg)
+  );
 }
 
 async function requirePartnerOwner({ req, partnerId }) {
