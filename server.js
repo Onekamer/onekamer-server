@@ -113,6 +113,111 @@ app.get("/api/market/fx-rate", async (req, res) => {
   }
 });
 
+app.post("/api/partner/connect/onboarding-link", bodyParser.json(), async (req, res) => {
+  try {
+    const { partnerId } = req.body || {};
+    if (!partnerId) return res.status(400).json({ error: "partnerId requis" });
+
+    const auth = await requirePartnerOwner({ req, partnerId });
+    if (!auth.ok) return res.status(auth.status).json({ error: auth.error });
+
+    let accountId = auth.partner?.stripe_connect_account_id || null;
+    if (!accountId) {
+      const account = await stripe.accounts.create({
+        type: "express",
+        capabilities: {
+          card_payments: { requested: true },
+          transfers: { requested: true },
+        },
+      });
+
+      accountId = account.id;
+      await supabase
+        .from("partners_market")
+        .update({
+          stripe_connect_account_id: accountId,
+          payout_status: "incomplete",
+          updated_at: new Date().toISOString(),
+        })
+        .eq("id", partnerId);
+    }
+
+    const frontendBase = String(process.env.FRONTEND_URL || "https://onekamer.co").replace(/\/$/, "");
+    const returnUrl = `${frontendBase}/compte`;
+    const refreshUrl = `${frontendBase}/compte`;
+
+    const link = await stripe.accountLinks.create({
+      account: accountId,
+      refresh_url: refreshUrl,
+      return_url: returnUrl,
+      type: "account_onboarding",
+    });
+
+    return res.json({ url: link.url, accountId });
+  } catch (e) {
+    return res.status(500).json({ error: e?.message || "Erreur interne" });
+  }
+});
+
+app.post("/api/partner/connect/sync-status", bodyParser.json(), async (req, res) => {
+  try {
+    const { partnerId } = req.body || {};
+    if (!partnerId) return res.status(400).json({ error: "partnerId requis" });
+
+    const auth = await requirePartnerOwner({ req, partnerId });
+    if (!auth.ok) return res.status(auth.status).json({ error: auth.error });
+
+    const accountId = auth.partner?.stripe_connect_account_id ? String(auth.partner.stripe_connect_account_id) : null;
+    if (!accountId) return res.status(400).json({ error: "stripe_connect_account_id manquant" });
+
+    const account = await stripe.accounts.retrieve(accountId);
+
+    const detailsSubmitted = account?.details_submitted === true;
+    const chargesEnabled = account?.charges_enabled === true;
+    const payoutsEnabled = account?.payouts_enabled === true;
+    const payoutStatus = detailsSubmitted && chargesEnabled && payoutsEnabled ? "complete" : "incomplete";
+
+    await supabase
+      .from("partners_market")
+      .update({
+        payout_status: payoutStatus,
+        updated_at: new Date().toISOString(),
+      })
+      .eq("id", partnerId);
+
+    await logEvent({
+      category: "marketplace",
+      action: "connect.status.sync",
+      status: "success",
+      userId: auth.userId,
+      context: {
+        partner_id: partnerId,
+        stripe_connect_account_id: accountId,
+        payout_status: payoutStatus,
+        details_submitted: detailsSubmitted,
+        charges_enabled: chargesEnabled,
+        payouts_enabled: payoutsEnabled,
+      },
+    });
+
+    return res.json({
+      ok: true,
+      payout_status: payoutStatus,
+      details_submitted: detailsSubmitted,
+      charges_enabled: chargesEnabled,
+      payouts_enabled: payoutsEnabled,
+    });
+  } catch (e) {
+    await logEvent({
+      category: "marketplace",
+      action: "connect.status.sync",
+      status: "error",
+      context: { error: e?.message || String(e) },
+    });
+    return res.status(500).json({ error: e?.message || "Erreur interne" });
+  }
+});
+
 function countryToCurrency(countryCode) {
   const cc = String(countryCode || "").trim().toUpperCase();
   if (!cc) return "EUR";
@@ -977,6 +1082,53 @@ app.post("/webhook", bodyParser.raw({ type: "application/json" }), async (req, r
   });
 
   try {
+    if (event.type === "account.updated" || event.type === "v2.core.account.updated") {
+      const account = event.data.object;
+      const accountId = account?.id ? String(account.id) : null;
+
+      if (accountId) {
+        const detailsSubmitted = account?.details_submitted === true;
+        const chargesEnabled = account?.charges_enabled === true;
+        const payoutsEnabled = account?.payouts_enabled === true;
+        const payoutStatus = detailsSubmitted && chargesEnabled && payoutsEnabled ? "complete" : "incomplete";
+
+        try {
+          await supabase
+            .from("partners_market")
+            .update({
+              payout_status: payoutStatus,
+              updated_at: new Date().toISOString(),
+            })
+            .eq("stripe_connect_account_id", accountId);
+
+          await logEvent({
+            category: "marketplace",
+            action: "connect.account.updated",
+            status: "success",
+            context: {
+              stripe_connect_account_id: accountId,
+              payout_status: payoutStatus,
+              details_submitted: detailsSubmitted,
+              charges_enabled: chargesEnabled,
+              payouts_enabled: payoutsEnabled,
+            },
+          });
+        } catch (e) {
+          await logEvent({
+            category: "marketplace",
+            action: "connect.account.updated",
+            status: "error",
+            context: {
+              stripe_connect_account_id: accountId,
+              error: e?.message || String(e),
+            },
+          });
+        }
+      }
+
+      return res.json({ received: true });
+    }
+
     if (event.type === "checkout.session.completed") {
       const session = event.data.object;
       const { userId, packId, planKey, promoCode, eventId, paymentMode } = session.metadata || {};
