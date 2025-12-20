@@ -2392,6 +2392,129 @@ app.delete("/api/admin/echange/audio/:commentId", async (req, res) => {
   }
 });
 
+app.delete("/api/admin/annonces/:annonceId", async (req, res) => {
+  try {
+    const { annonceId } = req.params;
+    if (!annonceId) return res.status(400).json({ error: "annonceId requis" });
+
+    const verif = await verifyIsAdminJWT(req);
+    if (!verif.ok) {
+      const status = verif.reason === "forbidden" ? 403 : 401;
+      return res.status(status).json({ error: verif.reason });
+    }
+
+    const { error: delErr } = await supabase.from("annonces").delete().eq("id", annonceId);
+    if (delErr) return res.status(500).json({ error: delErr.message || "Erreur suppression annonce" });
+    return res.json({ success: true });
+  } catch (e) {
+    console.error("❌ DELETE /api/admin/annonces/:annonceId:", e);
+    return res.status(500).json({ error: e?.message || "Erreur interne" });
+  }
+});
+
+app.patch("/api/admin/annonces/:annonceId", bodyParser.json(), async (req, res) => {
+  try {
+    const { annonceId } = req.params;
+    if (!annonceId) return res.status(400).json({ error: "annonceId requis" });
+
+    const verif = await verifyIsAdminJWT(req);
+    if (!verif.ok) {
+      const status = verif.reason === "forbidden" ? 403 : 401;
+      return res.status(status).json({ error: verif.reason });
+    }
+
+    const patch = req.body || {};
+    const update = {
+      updated_at: new Date().toISOString(),
+    };
+
+    if (patch.titre !== undefined) update.titre = patch.titre;
+    if (patch.categorie_id !== undefined) update.categorie_id = patch.categorie_id;
+    if (patch.prix !== undefined) update.prix = patch.prix;
+    if (patch.devise_id !== undefined) update.devise_id = patch.devise_id;
+    if (patch.pays_id !== undefined) update.pays_id = patch.pays_id;
+    if (patch.ville_id !== undefined) update.ville_id = patch.ville_id;
+    if (patch.telephone !== undefined) update.telephone = patch.telephone;
+    if (patch.email !== undefined) update.email = patch.email;
+    if (patch.description !== undefined) update.description = patch.description;
+    if (patch.media_url !== undefined) update.media_url = patch.media_url;
+    if (patch.media_type !== undefined) update.media_type = patch.media_type;
+
+    if (Object.keys(update).length === 1) return res.status(400).json({ error: "nothing_to_update" });
+
+    const { error } = await supabase.from("annonces").update(update).eq("id", annonceId);
+    if (error) return res.status(500).json({ error: error.message || "Erreur mise à jour annonce" });
+    return res.json({ success: true });
+  } catch (e) {
+    console.error("❌ PATCH /api/admin/annonces/:annonceId:", e);
+    return res.status(500).json({ error: e?.message || "Erreur interne" });
+  }
+});
+
+app.delete("/api/admin/evenements/:eventId", async (req, res) => {
+  try {
+    const { eventId } = req.params;
+    if (!eventId) return res.status(400).json({ error: "eventId requis" });
+
+    const verif = await verifyIsAdminJWT(req);
+    if (!verif.ok) {
+      const status = verif.reason === "forbidden" ? 403 : 401;
+      return res.status(status).json({ error: verif.reason });
+    }
+
+    const { error: delErr } = await supabase.from("evenements").delete().eq("id", eventId);
+    if (delErr) return res.status(500).json({ error: delErr.message || "Erreur suppression événement" });
+    return res.json({ success: true });
+  } catch (e) {
+    console.error("❌ DELETE /api/admin/evenements/:eventId:", e);
+    return res.status(500).json({ error: e?.message || "Erreur interne" });
+  }
+});
+
+app.patch("/api/admin/evenements/:eventId", bodyParser.json(), async (req, res) => {
+  try {
+    const { eventId } = req.params;
+    if (!eventId) return res.status(400).json({ error: "eventId requis" });
+
+    const verif = await verifyIsAdminJWT(req);
+    if (!verif.ok) {
+      const status = verif.reason === "forbidden" ? 403 : 401;
+      return res.status(status).json({ error: verif.reason });
+    }
+
+    const patch = req.body || {};
+    const update = {
+      updated_at: new Date().toISOString(),
+    };
+
+    if (patch.title !== undefined) update.title = patch.title;
+    if (patch.type_id !== undefined) update.type_id = patch.type_id;
+    if (patch.organisateur !== undefined) update.organisateur = patch.organisateur;
+    if (patch.date !== undefined) update.date = patch.date;
+    if (patch.time !== undefined) update.time = patch.time;
+    if (patch.location !== undefined) update.location = patch.location;
+    if (patch.latitude !== undefined) update.latitude = patch.latitude;
+    if (patch.longitude !== undefined) update.longitude = patch.longitude;
+    if (patch.price !== undefined) update.price = patch.price;
+    if (patch.devise_id !== undefined) update.devise_id = patch.devise_id;
+    if (patch.telephone !== undefined) update.telephone = patch.telephone;
+    if (patch.email !== undefined) update.email = patch.email;
+    if (patch.site_web !== undefined) update.site_web = patch.site_web;
+    if (patch.description !== undefined) update.description = patch.description;
+    if (patch.media_url !== undefined) update.media_url = patch.media_url;
+    if (patch.media_type !== undefined) update.media_type = patch.media_type;
+
+    if (Object.keys(update).length === 1) return res.status(400).json({ error: "nothing_to_update" });
+
+    const { error } = await supabase.from("evenements").update(update).eq("id", eventId);
+    if (error) return res.status(500).json({ error: error.message || "Erreur mise à jour événement" });
+    return res.json({ success: true });
+  } catch (e) {
+    console.error("❌ PATCH /api/admin/evenements/:eventId:", e);
+    return res.status(500).json({ error: e?.message || "Erreur interne" });
+  }
+});
+
 async function sendSupabaseLightPush(req, { title, message, targetUserIds, url = "/", data = {} }) {
   if (NOTIF_PROVIDER !== "supabase_light") return { ok: false, skipped: true, reason: "provider_not_supabase_light" };
   if (!Array.isArray(targetUserIds) || targetUserIds.length === 0) {
