@@ -113,6 +113,130 @@ app.get("/api/market/fx-rate", async (req, res) => {
   }
 });
 
+app.patch("/api/admin/partenaires/:partnerId", bodyParser.json(), async (req, res) => {
+  try {
+    const { partnerId } = req.params;
+    if (!partnerId) return res.status(400).json({ error: "partnerId requis" });
+
+    const verif = await verifyIsAdminJWT(req);
+    if (!verif.ok) {
+      const status = verif.reason === "forbidden" ? 403 : 401;
+      return res.status(status).json({ error: verif.reason });
+    }
+
+    const patch = req.body || {};
+    const update = {
+      updated_at: new Date().toISOString(),
+    };
+
+    const allowed = [
+      "name",
+      "category_id",
+      "address",
+      "phone",
+      "website",
+      "email",
+      "description",
+      "recommandation",
+      "latitude",
+      "longitude",
+      "media_url",
+      "media_type",
+    ];
+
+    allowed.forEach((k) => {
+      if (patch[k] !== undefined) update[k] = patch[k];
+    });
+
+    if (Object.keys(update).length === 1) return res.status(400).json({ error: "nothing_to_update" });
+
+    const { error } = await supabase.from("partenaires").update(update).eq("id", partnerId);
+    if (error) return res.status(500).json({ error: error.message || "Erreur mise à jour partenaire" });
+    return res.json({ success: true });
+  } catch (e) {
+    console.error("❌ PATCH /api/admin/partenaires/:partnerId:", e);
+    return res.status(500).json({ error: e?.message || "Erreur interne" });
+  }
+});
+
+app.delete("/api/admin/partenaires/:partnerId", async (req, res) => {
+  try {
+    const { partnerId } = req.params;
+    if (!partnerId) return res.status(400).json({ error: "partnerId requis" });
+
+    const verif = await verifyIsAdminJWT(req);
+    if (!verif.ok) {
+      const status = verif.reason === "forbidden" ? 403 : 401;
+      return res.status(status).json({ error: verif.reason });
+    }
+
+    await supabase.from("favoris").delete().eq("type_contenu", "partenaire").eq("content_id", partnerId);
+
+    const { error: delErr } = await supabase.from("partenaires").delete().eq("id", partnerId);
+    if (delErr) return res.status(500).json({ error: delErr.message || "Erreur suppression partenaire" });
+    return res.json({ success: true });
+  } catch (e) {
+    console.error("❌ DELETE /api/admin/partenaires/:partnerId:", e);
+    return res.status(500).json({ error: e?.message || "Erreur interne" });
+  }
+});
+
+app.patch("/api/admin/faits-divers/:articleId", bodyParser.json(), async (req, res) => {
+  try {
+    const { articleId } = req.params;
+    if (!articleId) return res.status(400).json({ error: "articleId requis" });
+
+    const verif = await verifyIsAdminJWT(req);
+    if (!verif.ok) {
+      const status = verif.reason === "forbidden" ? 403 : 401;
+      return res.status(status).json({ error: verif.reason });
+    }
+
+    const patch = req.body || {};
+    const update = {
+      updated_at: new Date().toISOString(),
+    };
+
+    const allowed = ["title", "category_id", "excerpt", "full_content", "image_url"];
+    allowed.forEach((k) => {
+      if (patch[k] !== undefined) update[k] = patch[k];
+    });
+
+    if (Object.keys(update).length === 1) return res.status(400).json({ error: "nothing_to_update" });
+
+    const { error } = await supabase.from("faits_divers").update(update).eq("id", articleId);
+    if (error) return res.status(500).json({ error: error.message || "Erreur mise à jour fait divers" });
+    return res.json({ success: true });
+  } catch (e) {
+    console.error("❌ PATCH /api/admin/faits-divers/:articleId:", e);
+    return res.status(500).json({ error: e?.message || "Erreur interne" });
+  }
+});
+
+app.delete("/api/admin/faits-divers/:articleId", async (req, res) => {
+  try {
+    const { articleId } = req.params;
+    if (!articleId) return res.status(400).json({ error: "articleId requis" });
+
+    const verif = await verifyIsAdminJWT(req);
+    if (!verif.ok) {
+      const status = verif.reason === "forbidden" ? 403 : 401;
+      return res.status(status).json({ error: verif.reason });
+    }
+
+    await supabase.from("faits_divers_comments").delete().eq("fait_divers_id", articleId);
+    await supabase.from("faits_divers_likes").delete().eq("fait_divers_id", articleId);
+    await supabase.from("favoris").delete().eq("type_contenu", "fait_divers").eq("content_id", articleId);
+
+    const { error: delErr } = await supabase.from("faits_divers").delete().eq("id", articleId);
+    if (delErr) return res.status(500).json({ error: delErr.message || "Erreur suppression fait divers" });
+    return res.json({ success: true });
+  } catch (e) {
+    console.error("❌ DELETE /api/admin/faits-divers/:articleId:", e);
+    return res.status(500).json({ error: e?.message || "Erreur interne" });
+  }
+});
+
 app.post("/api/partner/connect/onboarding-link", bodyParser.json(), async (req, res) => {
   try {
     const { partnerId } = req.body || {};
