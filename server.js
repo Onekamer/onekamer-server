@@ -447,6 +447,35 @@ async function requireUserJWT(req) {
   return { ok: true, userId: userData.user.id, token };
 }
 
+app.post("/api/presence/heartbeat", async (req, res) => {
+  try {
+    const guard = await requireUserJWT(req);
+    if (!guard.ok) return res.status(guard.status).json({ error: guard.error });
+
+    const { data: prof, error: pErr } = await supabase
+      .from("profiles")
+      .select("id, show_online_status")
+      .eq("id", guard.userId)
+      .maybeSingle();
+    if (pErr) return res.status(500).json({ error: pErr.message || "profile_read_failed" });
+    if (!prof) return res.status(404).json({ error: "profile_not_found" });
+
+    if (prof.show_online_status !== true) {
+      return res.json({ ok: true, updated: false });
+    }
+
+    const now = new Date().toISOString();
+    const { error: upErr } = await supabase
+      .from("profiles")
+      .update({ last_seen_at: now, updated_at: now })
+      .eq("id", guard.userId);
+    if (upErr) return res.status(500).json({ error: upErr.message || "profile_update_failed" });
+    return res.json({ ok: true, updated: true, last_seen_at: now });
+  } catch (e) {
+    return res.status(500).json({ error: e?.message || "Erreur interne" });
+  }
+});
+
 async function getActiveFeeSettings(currency) {
   const cur = String(currency || "").trim().toUpperCase();
   const { data, error } = await supabase
@@ -2493,7 +2522,7 @@ app.get("/api/admin/users", async (req, res) => {
 
       const { data: profs, error: pErr } = await supabase
         .from("profiles")
-        .select("id, username, full_name, plan, role, is_admin")
+        .select("id, username, full_name, plan, role, is_admin, show_online_status, last_seen_at")
         .in("id", ids);
       if (pErr) return res.status(500).json({ error: pErr.message || "Erreur lecture profiles" });
 
@@ -2510,6 +2539,8 @@ app.get("/api/admin/users", async (req, res) => {
             plan: p.plan || null,
             role: p.role || null,
             is_admin: p.is_admin,
+            show_online_status: p.show_online_status,
+            last_seen_at: p.last_seen_at,
           };
         })
         .filter(Boolean);
@@ -2519,7 +2550,7 @@ app.get("/api/admin/users", async (req, res) => {
 
     let q = supabase
       .from("profiles")
-      .select("id, username, full_name, plan, role, is_admin", { count: "exact" })
+      .select("id, username, full_name, plan, role, is_admin, show_online_status, last_seen_at", { count: "exact" })
       .order("updated_at", { ascending: false });
 
     if (search) {
@@ -2557,6 +2588,8 @@ app.get("/api/admin/users", async (req, res) => {
         plan: p.plan || null,
         role: p.role || null,
         is_admin: p.is_admin,
+        show_online_status: p.show_online_status,
+        last_seen_at: p.last_seen_at,
       };
     });
 
