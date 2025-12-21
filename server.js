@@ -2814,7 +2814,7 @@ app.get("/api/admin/invites/users-stats", async (req, res) => {
       const q = search.toLowerCase();
       if (!q) return res.json({ items: [], limit: suggestLimit });
 
-      const maxScan = 5000;
+      const maxScan = 20000;
       const { data: invitesRaw, error: invErr } = await supabase
         .from("invites")
         .select("inviter_user_id, created_at")
@@ -2830,15 +2830,47 @@ app.get("/api/admin/invites/users-stats", async (req, res) => {
 
       const { data: profs, error: pErr } = await supabase
         .from("profiles")
-        .select("id, username, email")
+        .select("id, username")
         .in("id", inviterIds);
       if (pErr) return res.status(500).json({ error: pErr.message || "profiles_read_failed" });
+
+      const emailByUserId = {};
+      const emailSearchMode = q.includes("@");
+      if (supabase?.auth?.admin?.getUserById) {
+        if (emailSearchMode) {
+          for (const uid of inviterIds) {
+            if (Object.keys(emailByUserId).length >= Math.max(suggestLimit * 3, 30)) break;
+            try {
+              const { data: uData, error: uErr } = await supabase.auth.admin.getUserById(uid);
+              if (uErr) continue;
+              const email = String(uData?.user?.email || "").trim();
+              if (email) emailByUserId[String(uid)] = email;
+            } catch {
+              // ignore
+            }
+          }
+        } else {
+          const profIds = Array.isArray(profs) ? profs.map((p) => p?.id).filter(Boolean) : [];
+          await Promise.all(
+            profIds.slice(0, 50).map(async (uid) => {
+              try {
+                const { data: uData, error: uErr } = await supabase.auth.admin.getUserById(uid);
+                if (uErr) return;
+                const email = String(uData?.user?.email || "").trim();
+                if (email) emailByUserId[String(uid)] = email;
+              } catch {
+                // ignore
+              }
+            })
+          );
+        }
+      }
 
       const items = (profs || [])
         .map((p) => ({
           id: p?.id || null,
           username: p?.username || null,
-          email: p?.email || null,
+          email: p?.id ? emailByUserId[String(p.id)] || null : null,
         }))
         .filter((p) => p.id)
         .filter((p) => {
@@ -2856,7 +2888,7 @@ app.get("/api/admin/invites/users-stats", async (req, res) => {
     if (period === "7d") sinceIso = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString();
     else if (period === "30d") sinceIso = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString();
 
-    const maxScan = 2000;
+    const maxScan = 10000;
     const baseInvQuery = supabase
       .from("invites")
       .select("code, inviter_user_id, created_at")
@@ -2873,12 +2905,34 @@ app.get("/api/admin/invites/users-stats", async (req, res) => {
 
     const profById = new Map();
     if (inviterIds.length > 0) {
+      const emailByUserId = {};
+      if (supabase?.auth?.admin?.getUserById) {
+        await Promise.all(
+          inviterIds.map(async (uid) => {
+            try {
+              const { data: uData, error: uErr } = await supabase.auth.admin.getUserById(uid);
+              if (uErr) return;
+              const email = String(uData?.user?.email || "").trim();
+              if (email) emailByUserId[String(uid)] = email;
+            } catch {
+              // ignore
+            }
+          })
+        );
+      }
       const { data: profs, error: pErr } = await supabase
         .from("profiles")
-        .select("id, username, email")
+        .select("id, username")
         .in("id", inviterIds);
       if (pErr) return res.status(500).json({ error: pErr.message || "profiles_read_failed" });
-      (profs || []).forEach((p) => profById.set(String(p.id), p));
+      (profs || []).forEach((p) => {
+        const uid = p?.id ? String(p.id) : null;
+        if (!uid) return;
+        profById.set(uid, {
+          ...p,
+          email: emailByUserId[uid] || null,
+        });
+      });
     }
 
     let filtered = invites
