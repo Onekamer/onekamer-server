@@ -2834,50 +2834,48 @@ app.get("/api/admin/invites/users-stats", async (req, res) => {
         .in("id", inviterIds);
       if (pErr) return res.status(500).json({ error: pErr.message || "profiles_read_failed" });
 
-      const emailByUserId = {};
-      const emailSearchMode = q.includes("@");
-      if (supabase?.auth?.admin?.getUserById) {
-        if (emailSearchMode) {
-          for (const uid of inviterIds) {
-            if (Object.keys(emailByUserId).length >= Math.max(suggestLimit * 3, 30)) break;
-            try {
-              const { data: uData, error: uErr } = await supabase.auth.admin.getUserById(uid);
-              if (uErr) continue;
-              const email = String(uData?.user?.email || "").trim();
-              if (email) emailByUserId[String(uid)] = email;
-            } catch {
-              // ignore
-            }
-          }
-        } else {
-          const profIds = Array.isArray(profs) ? profs.map((p) => p?.id).filter(Boolean) : [];
-          await Promise.all(
-            profIds.slice(0, 50).map(async (uid) => {
-              try {
-                const { data: uData, error: uErr } = await supabase.auth.admin.getUserById(uid);
-                if (uErr) return;
-                const email = String(uData?.user?.email || "").trim();
-                if (email) emailByUserId[String(uid)] = email;
-              } catch {
-                // ignore
-              }
-            })
-          );
-        }
-      }
-
-      const items = (profs || [])
+      const profList = Array.isArray(profs) ? profs : [];
+      const base = profList
         .map((p) => ({
           id: p?.id || null,
           username: p?.username || null,
-          email: p?.id ? emailByUserId[String(p.id)] || null : null,
         }))
-        .filter((p) => p.id)
-        .filter((p) => {
-          const u = String(p.username || "").toLowerCase();
-          const e = String(p.email || "").toLowerCase();
-          return u.includes(q) || e.includes(q);
-        })
+        .filter((p) => p.id);
+
+      const itemsById = new Map();
+      const usernameMatched = base.filter((p) => String(p.username || "").toLowerCase().includes(q));
+      usernameMatched.forEach((p) => itemsById.set(String(p.id), { ...p, email: null }));
+
+      if (itemsById.size < suggestLimit && supabase?.auth?.admin?.getUserById) {
+        const remaining = suggestLimit - itemsById.size;
+        const maxEmailChecks = Math.min(Math.max(remaining * 8, 50), 300);
+        const idsToCheck = base
+          .map((p) => String(p.id))
+          .filter((id) => !itemsById.has(id))
+          .slice(0, maxEmailChecks);
+
+        for (const uid of idsToCheck) {
+          if (itemsById.size >= suggestLimit) break;
+          try {
+            const { data: uData, error: uErr } = await supabase.auth.admin.getUserById(uid);
+            if (uErr) continue;
+            const email = String(uData?.user?.email || "").trim();
+            if (!email) continue;
+            if (!email.toLowerCase().includes(q)) continue;
+
+            const found = base.find((p) => String(p.id) === String(uid)) || null;
+            itemsById.set(String(uid), {
+              id: uid,
+              username: found?.username || null,
+              email,
+            });
+          } catch {
+            // ignore
+          }
+        }
+      }
+
+      const items = Array.from(itemsById.values())
         .sort((a, b) => String(a.username || a.email || "").localeCompare(String(b.username || b.email || "")))
         .slice(0, suggestLimit);
 
