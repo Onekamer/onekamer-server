@@ -2791,6 +2791,115 @@ app.get("/api/admin/users", async (req, res) => {
   }
 });
 
+app.get("/api/admin/invites/users-stats", async (req, res) => {
+  try {
+    const verif = await verifyIsAdminJWT(req);
+    if (!verif.ok) {
+      const status = verif.reason === "forbidden" ? 403 : 401;
+      return res.status(status).json({ error: verif.reason });
+    }
+
+    const period = String(req.query?.period || "30d").toLowerCase();
+    const search = String(req.query?.search || "").trim();
+    const limitRaw = req.query?.limit;
+    const offsetRaw = req.query?.offset;
+    const limit = Math.min(Math.max(parseInt(limitRaw, 10) || 20, 1), 50);
+    const offset = Math.max(parseInt(offsetRaw, 10) || 0, 0);
+
+    let sinceIso = null;
+    if (period === "7d") sinceIso = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString();
+    else if (period === "30d") sinceIso = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString();
+
+    const maxScan = 2000;
+    const baseInvQuery = supabase
+      .from("invites")
+      .select("code, inviter_user_id, created_at")
+      .is("revoked_at", null)
+      .order("created_at", { ascending: false })
+      .limit(search ? maxScan : limit)
+      .range(search ? 0 : offset, search ? Math.min(maxScan - 1, maxScan - 1) : offset + limit - 1);
+
+    const { data: invitesRaw, error: invErr } = await baseInvQuery;
+    if (invErr) return res.status(500).json({ error: invErr.message || "invite_read_failed" });
+
+    const invites = Array.isArray(invitesRaw) ? invitesRaw : [];
+    const inviterIds = Array.from(new Set(invites.map((i) => i?.inviter_user_id).filter(Boolean)));
+
+    const profById = new Map();
+    if (inviterIds.length > 0) {
+      const { data: profs, error: pErr } = await supabase
+        .from("profiles")
+        .select("id, username, email")
+        .in("id", inviterIds);
+      if (pErr) return res.status(500).json({ error: pErr.message || "profiles_read_failed" });
+      (profs || []).forEach((p) => profById.set(String(p.id), p));
+    }
+
+    let filtered = invites
+      .map((i) => {
+        const uid = i?.inviter_user_id ? String(i.inviter_user_id) : null;
+        const prof = uid ? profById.get(uid) || null : null;
+        return {
+          code: i?.code || null,
+          inviter_user_id: uid,
+          created_at: i?.created_at || null,
+          username: prof?.username || null,
+          email: prof?.email || null,
+        };
+      })
+      .filter((r) => r.code && r.inviter_user_id);
+
+    if (search) {
+      const q = search.toLowerCase();
+      filtered = filtered.filter((r) => {
+        const u = String(r.username || "").toLowerCase();
+        const e = String(r.email || "").toLowerCase();
+        return u.includes(q) || e.includes(q);
+      });
+    }
+
+    const count = filtered.length;
+    const paged = filtered.slice(offset, offset + limit);
+    const events = ["click", "signup", "first_login", "install"];
+
+    const rows = [];
+    for (const r of paged) {
+      const stats = {};
+      for (const ev of events) {
+        let q = supabase
+          .from("invite_events")
+          .select("id", { count: "exact", head: true })
+          .eq("code", r.code)
+          .eq("event", ev);
+        if (sinceIso) q = q.gte("created_at", sinceIso);
+        const { count: c, error: cErr } = await q;
+        if (cErr) return res.status(500).json({ error: cErr.message || "stats_read_failed" });
+        stats[ev] = c || 0;
+      }
+
+      let recentQuery = supabase
+        .from("invite_events")
+        .select("id, event, created_at, user_id, user_username, user_email, meta")
+        .eq("code", r.code)
+        .order("created_at", { ascending: false })
+        .limit(5);
+      if (sinceIso) recentQuery = recentQuery.gte("created_at", sinceIso);
+      const { data: recent, error: recErr } = await recentQuery;
+      if (recErr) return res.status(500).json({ error: recErr.message || "events_read_failed" });
+
+      rows.push({
+        ...r,
+        stats,
+        recent: recent || [],
+      });
+    }
+
+    return res.json({ rows, count, limit, offset, period });
+  } catch (e) {
+    return res.status(500).json({ error: e?.message || "Erreur interne" });
+  }
+});
+
 app.patch("/api/admin/users/:id", bodyParser.json(), async (req, res) => {
   try {
     const { id } = req.params;
