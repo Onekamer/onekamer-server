@@ -2461,6 +2461,192 @@ async function verifyIsAdminJWT(req) {
   return { ok: true, userId };
 }
 
+app.get("/api/admin/users", async (req, res) => {
+  try {
+    const verif = await verifyIsAdminJWT(req);
+    if (!verif.ok) {
+      const status = verif.reason === "forbidden" ? 403 : 401;
+      return res.status(status).json({ error: verif.reason });
+    }
+
+    const searchRaw = req.query.search ? String(req.query.search).trim() : "";
+    const search = searchRaw.length ? searchRaw : "";
+    const limitRaw = req.query.limit;
+    const offsetRaw = req.query.offset;
+    const limit = Math.min(Math.max(parseInt(limitRaw, 10) || 20, 1), 50);
+    const offset = Math.max(parseInt(offsetRaw, 10) || 0, 0);
+
+    const emailSearchMode = search.includes("@");
+    let items = [];
+    let total = null;
+
+    if (emailSearchMode && supabase?.auth?.admin?.listUsers) {
+      const page = Math.floor(offset / limit) + 1;
+      const { data: uData, error: uErr } = await supabase.auth.admin.listUsers({ page, perPage: limit });
+      if (uErr) return res.status(500).json({ error: uErr.message || "Erreur lecture utilisateurs" });
+
+      const users = Array.isArray(uData?.users) ? uData.users : [];
+      const q = search.toLowerCase();
+      const filtered = users.filter((u) => String(u?.email || "").toLowerCase().includes(q));
+      const ids = filtered.map((u) => u.id).filter(Boolean);
+      if (ids.length === 0) return res.json({ items: [], total: 0, limit, offset });
+
+      const { data: profs, error: pErr } = await supabase
+        .from("profiles")
+        .select("id, username, full_name, plan, role, is_admin")
+        .in("id", ids);
+      if (pErr) return res.status(500).json({ error: pErr.message || "Erreur lecture profiles" });
+
+      const profById = new Map((profs || []).map((p) => [String(p.id), p]));
+      items = filtered
+        .map((u) => {
+          const p = profById.get(String(u.id));
+          if (!p) return null;
+          return {
+            id: p.id,
+            username: p.username || null,
+            full_name: p.full_name || null,
+            email: u.email || null,
+            plan: p.plan || null,
+            role: p.role || null,
+            is_admin: p.is_admin,
+          };
+        })
+        .filter(Boolean);
+      total = items.length;
+      return res.json({ items, total, limit, offset });
+    }
+
+    let q = supabase
+      .from("profiles")
+      .select("id, username, full_name, plan, role, is_admin", { count: "exact" })
+      .order("updated_at", { ascending: false });
+
+    if (search) {
+      q = q.or(`username.ilike.%${search}%,full_name.ilike.%${search}%`);
+    }
+
+    const { data: profs, error: pErr, count } = await q.range(offset, offset + limit - 1);
+    if (pErr) return res.status(500).json({ error: pErr.message || "Erreur lecture profiles" });
+    total = typeof count === "number" ? count : null;
+
+    const emailByUserId = {};
+    const ids = Array.isArray(profs) ? profs.map((p) => p?.id).filter(Boolean) : [];
+    if (ids.length > 0 && supabase?.auth?.admin?.getUserById) {
+      await Promise.all(
+        ids.map(async (uid) => {
+          try {
+            const { data: uData, error: uErr } = await supabase.auth.admin.getUserById(uid);
+            if (uErr) return;
+            const email = String(uData?.user?.email || "").trim();
+            if (email) emailByUserId[String(uid)] = email;
+          } catch {
+            // ignore
+          }
+        })
+      );
+    }
+
+    items = (profs || []).map((p) => {
+      const pid = p?.id ? String(p.id) : null;
+      return {
+        id: p.id,
+        username: p.username || null,
+        full_name: p.full_name || null,
+        email: pid ? emailByUserId[pid] || null : null,
+        plan: p.plan || null,
+        role: p.role || null,
+        is_admin: p.is_admin,
+      };
+    });
+
+    if (search && !emailSearchMode) {
+      const lowered = search.toLowerCase();
+      const emailMatched = items.filter((it) => String(it.email || "").toLowerCase().includes(lowered));
+      if (emailMatched.length > 0) {
+        const mergedById = new Map(items.map((it) => [String(it.id), it]));
+        emailMatched.forEach((it) => mergedById.set(String(it.id), it));
+        items = Array.from(mergedById.values());
+      }
+    }
+
+    return res.json({ items, total, limit, offset });
+  } catch (e) {
+    return res.status(500).json({ error: e?.message || "Erreur interne" });
+  }
+});
+
+app.patch("/api/admin/users/:id", bodyParser.json(), async (req, res) => {
+  try {
+    const { id } = req.params;
+    if (!id) return res.status(400).json({ error: "id requis" });
+
+    const verif = await verifyIsAdminJWT(req);
+    if (!verif.ok) {
+      const status = verif.reason === "forbidden" ? 403 : 401;
+      return res.status(status).json({ error: verif.reason });
+    }
+
+    const planRaw = req.body?.plan;
+    const roleRaw = req.body?.role;
+
+    const plan = planRaw != null ? String(planRaw).toLowerCase().trim() : null;
+    const role = roleRaw != null ? String(roleRaw).toLowerCase().trim() : null;
+
+    const allowedPlans = ["free", "standard", "vip"];
+    const allowedRoles = ["user", "admin", "qrcode_verif"];
+
+    if (plan && !allowedPlans.includes(plan)) {
+      return res.status(400).json({ error: "Plan invalide" });
+    }
+    if (role && !allowedRoles.includes(role)) {
+      return res.status(400).json({ error: "Rôle invalide" });
+    }
+
+    const updatePayload = {};
+    if (plan) updatePayload.plan = plan;
+    if (role) {
+      updatePayload.role = role;
+      updatePayload.is_admin = role === "admin";
+    }
+
+    if (Object.keys(updatePayload).length === 0) {
+      return res.status(400).json({ error: "Aucune mise à jour" });
+    }
+
+    updatePayload.updated_at = new Date().toISOString();
+
+    const { data: updated, error } = await supabase
+      .from("profiles")
+      .update(updatePayload)
+      .eq("id", id)
+      .select("id, username, full_name, plan, role, is_admin")
+      .maybeSingle();
+
+    if (error) return res.status(500).json({ error: error.message || "Erreur update profil" });
+    if (!updated) return res.status(404).json({ error: "Utilisateur introuvable" });
+
+    let email = null;
+    if (supabase?.auth?.admin?.getUserById) {
+      try {
+        const { data: uData, error: uErr } = await supabase.auth.admin.getUserById(updated.id);
+        if (!uErr) email = String(uData?.user?.email || "").trim() || null;
+      } catch {
+        // ignore
+      }
+    }
+
+    return res.json({
+      item: {
+        ...updated,
+        email,
+      },
+    });
+  } catch (e) {
+    return res.status(500).json({ error: e?.message || "Erreur interne" });
+  }
+});
+
 app.delete("/api/admin/echange/posts/:postId", async (req, res) => {
   try {
     const { postId } = req.params;
