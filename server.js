@@ -2801,10 +2801,56 @@ app.get("/api/admin/invites/users-stats", async (req, res) => {
 
     const period = String(req.query?.period || "30d").toLowerCase();
     const search = String(req.query?.search || "").trim();
+    const suggestRaw = String(req.query?.suggest || "").toLowerCase();
+    const suggest = suggestRaw === "1" || suggestRaw === "true" || suggestRaw === "yes";
+    const suggestLimitRaw = req.query?.suggest_limit;
+    const suggestLimit = Math.min(Math.max(parseInt(suggestLimitRaw, 10) || 10, 1), 20);
     const limitRaw = req.query?.limit;
     const offsetRaw = req.query?.offset;
     const limit = Math.min(Math.max(parseInt(limitRaw, 10) || 20, 1), 50);
     const offset = Math.max(parseInt(offsetRaw, 10) || 0, 0);
+
+    if (suggest) {
+      const q = search.toLowerCase();
+      if (!q) return res.json({ items: [], limit: suggestLimit });
+
+      const maxScan = 5000;
+      const { data: invitesRaw, error: invErr } = await supabase
+        .from("invites")
+        .select("inviter_user_id, created_at")
+        .is("revoked_at", null)
+        .order("created_at", { ascending: false })
+        .limit(maxScan);
+      if (invErr) return res.status(500).json({ error: invErr.message || "invite_read_failed" });
+
+      const inviterIds = Array.from(
+        new Set((invitesRaw || []).map((i) => i?.inviter_user_id).filter(Boolean).map((id) => String(id)))
+      );
+      if (inviterIds.length === 0) return res.json({ items: [], limit: suggestLimit });
+
+      const { data: profs, error: pErr } = await supabase
+        .from("profiles")
+        .select("id, username, email")
+        .in("id", inviterIds);
+      if (pErr) return res.status(500).json({ error: pErr.message || "profiles_read_failed" });
+
+      const items = (profs || [])
+        .map((p) => ({
+          id: p?.id || null,
+          username: p?.username || null,
+          email: p?.email || null,
+        }))
+        .filter((p) => p.id)
+        .filter((p) => {
+          const u = String(p.username || "").toLowerCase();
+          const e = String(p.email || "").toLowerCase();
+          return u.includes(q) || e.includes(q);
+        })
+        .sort((a, b) => String(a.username || a.email || "").localeCompare(String(b.username || b.email || "")))
+        .slice(0, suggestLimit);
+
+      return res.json({ items, limit: suggestLimit });
+    }
 
     let sinceIso = null;
     if (period === "7d") sinceIso = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString();
