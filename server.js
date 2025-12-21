@@ -447,6 +447,188 @@ async function requireUserJWT(req) {
   return { ok: true, userId: userData.user.id, token };
 }
 
+function getRequestIp(req) {
+  const xff = req.headers["x-forwarded-for"];
+  if (typeof xff === "string" && xff.trim()) return xff.split(",")[0].trim();
+  return req.ip || req.connection?.remoteAddress || "";
+}
+
+function hashIp(ip) {
+  const v = String(ip || "").trim();
+  if (!v) return null;
+  return crypto.createHash("sha256").update(v).digest("hex");
+}
+
+function generateInviteCode() {
+  return `OK-${crypto.randomBytes(4).toString("hex").toUpperCase()}`;
+}
+
+app.post("/api/invites/my-code", bodyParser.json(), async (req, res) => {
+  try {
+    const guard = await requireUserJWT(req);
+    if (!guard.ok) return res.status(guard.status).json({ error: guard.error });
+
+    const { data: existing, error: readErr } = await supabase
+      .from("invites")
+      .select("code, created_at, revoked_at")
+      .eq("inviter_user_id", guard.userId)
+      .is("revoked_at", null)
+      .order("created_at", { ascending: false })
+      .limit(1)
+      .maybeSingle();
+    if (readErr) return res.status(500).json({ error: readErr.message || "invite_read_failed" });
+    if (existing?.code) return res.json({ code: existing.code, created_at: existing.created_at });
+
+    let code = generateInviteCode();
+    for (let i = 0; i < 5; i += 1) {
+      const { error: insErr } = await supabase
+        .from("invites")
+        .insert({ code, inviter_user_id: guard.userId });
+      if (!insErr) return res.json({ code });
+      code = generateInviteCode();
+    }
+
+    return res.status(500).json({ error: "invite_create_failed" });
+  } catch (e) {
+    return res.status(500).json({ error: e?.message || "Erreur interne" });
+  }
+});
+
+app.post("/api/invites/track", bodyParser.json(), async (req, res) => {
+  try {
+    const { code, event, meta, user_email, user_username } = req.body || {};
+    const cleanCode = String(code || "").trim();
+    const cleanEvent = String(event || "").trim();
+    if (!cleanCode) return res.status(400).json({ error: "missing_code" });
+    if (!cleanEvent) return res.status(400).json({ error: "missing_event" });
+
+    const allowed = new Set(["click", "signup", "first_login", "install"]);
+    if (!allowed.has(cleanEvent)) return res.status(400).json({ error: "invalid_event" });
+
+    const { data: invite, error: invErr } = await supabase
+      .from("invites")
+      .select("code, inviter_user_id, revoked_at")
+      .eq("code", cleanCode)
+      .maybeSingle();
+    if (invErr) return res.status(500).json({ error: invErr.message || "invite_read_failed" });
+    if (!invite || invite.revoked_at) return res.status(404).json({ error: "invite_not_found" });
+
+    let trackedUserId = null;
+    let trackedEmail = null;
+    let trackedUsername = null;
+
+    const authHeader = req.headers["authorization"] || "";
+    if (authHeader.startsWith("Bearer ")) {
+      const guard = await requireUserJWT(req);
+      if (guard.ok) {
+        trackedUserId = guard.userId;
+        const supabaseAuth = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_ANON_KEY);
+        const { data: userData } = await supabaseAuth.auth.getUser(guard.token);
+        trackedEmail = userData?.user?.email || null;
+
+        const { data: prof } = await supabase
+          .from("profiles")
+          .select("username")
+          .eq("id", guard.userId)
+          .maybeSingle();
+        trackedUsername = prof?.username || null;
+      }
+    }
+
+    if (!trackedEmail && user_email) trackedEmail = String(user_email).trim() || null;
+    if (!trackedUsername && user_username) trackedUsername = String(user_username).trim() || null;
+
+    const ip = getRequestIp(req);
+    const ipHash = hashIp(ip);
+    const ua = String(req.headers["user-agent"] || "").slice(0, 500) || null;
+
+    if (cleanEvent === "click" && ipHash) {
+      const since = new Date(Date.now() - 10 * 60 * 1000).toISOString();
+      const { data: lastClick } = await supabase
+        .from("invite_events")
+        .select("id")
+        .eq("code", cleanCode)
+        .eq("event", "click")
+        .eq("ip_hash", ipHash)
+        .gte("created_at", since)
+        .order("created_at", { ascending: false })
+        .limit(1);
+      if (Array.isArray(lastClick) && lastClick.length > 0) {
+        return res.json({ ok: true, deduped: true });
+      }
+    }
+
+    const { error: insErr } = await supabase
+      .from("invite_events")
+      .insert({
+        code: cleanCode,
+        event: cleanEvent,
+        user_id: trackedUserId,
+        user_username: trackedUsername,
+        user_email: trackedEmail,
+        ip_hash: ipHash,
+        user_agent: ua,
+        meta: meta && typeof meta === "object" ? meta : null,
+      });
+    if (insErr) return res.status(500).json({ error: insErr.message || "invite_event_insert_failed" });
+
+    return res.json({ ok: true });
+  } catch (e) {
+    return res.status(500).json({ error: e?.message || "Erreur interne" });
+  }
+});
+
+app.get("/api/invites/my-stats", async (req, res) => {
+  try {
+    const guard = await requireUserJWT(req);
+    if (!guard.ok) return res.status(guard.status).json({ error: guard.error });
+
+    const period = String(req.query?.period || "30d").toLowerCase();
+    let sinceIso = null;
+    if (period === "7d") sinceIso = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString();
+    else if (period === "30d") sinceIso = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString();
+
+    const { data: invite, error: invErr } = await supabase
+      .from("invites")
+      .select("code, created_at")
+      .eq("inviter_user_id", guard.userId)
+      .is("revoked_at", null)
+      .order("created_at", { ascending: false })
+      .limit(1)
+      .maybeSingle();
+    if (invErr) return res.status(500).json({ error: invErr.message || "invite_read_failed" });
+    if (!invite?.code) return res.json({ code: null, stats: {}, recent: [] });
+
+    const events = ["click", "signup", "first_login", "install"];
+    const stats = {};
+    for (const ev of events) {
+      let q = supabase
+        .from("invite_events")
+        .select("id", { count: "exact", head: true })
+        .eq("code", invite.code)
+        .eq("event", ev);
+      if (sinceIso) q = q.gte("created_at", sinceIso);
+      const { count, error } = await q;
+      if (error) return res.status(500).json({ error: error.message || "stats_read_failed" });
+      stats[ev] = count || 0;
+    }
+
+    let recentQuery = supabase
+      .from("invite_events")
+      .select("id, event, created_at, user_id, user_username, user_email, meta")
+      .eq("code", invite.code)
+      .order("created_at", { ascending: false })
+      .limit(10);
+    if (sinceIso) recentQuery = recentQuery.gte("created_at", sinceIso);
+    const { data: recent, error: recErr } = await recentQuery;
+    if (recErr) return res.status(500).json({ error: recErr.message || "events_read_failed" });
+
+    return res.json({ code: invite.code, stats, recent: recent || [] });
+  } catch (e) {
+    return res.status(500).json({ error: e?.message || "Erreur interne" });
+  }
+});
+
 app.post("/api/presence/heartbeat", async (req, res) => {
   try {
     const guard = await requireUserJWT(req);
