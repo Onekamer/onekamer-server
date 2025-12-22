@@ -1958,8 +1958,18 @@ async function brevoUpsertContact({ email, username, listId }) {
   }
 }
 
+function maskEmail(email) {
+  const e = String(email || "").trim();
+  const at = e.indexOf("@");
+  if (at <= 0) return "***";
+  const local = e.slice(0, at);
+  const domain = e.slice(at + 1);
+  const head = local.slice(0, 2);
+  return `${head}${local.length > 2 ? "***" : "***"}@${domain}`;
+}
+
 async function mapLimit(items, limit, fn) {
-  const results = { ok: 0, fail: 0 };
+  const results = { ok: 0, fail: 0, failedSamples: [] };
   let index = 0;
 
   async function worker() {
@@ -1968,8 +1978,23 @@ async function mapLimit(items, limit, fn) {
       try {
         await fn(current);
         results.ok += 1;
-      } catch {
+      } catch (e) {
         results.fail += 1;
+
+        if (results.failedSamples.length < 20) {
+          results.failedSamples.push({
+            email: maskEmail(current?.email),
+            error: String(e?.message || e || "unknown_error"),
+          });
+        }
+
+        if (results.failedSamples.length <= 3) {
+          console.warn(
+            "⚠️ Brevo sync contact failed:",
+            maskEmail(current?.email),
+            String(e?.message || e || "unknown_error")
+          );
+        }
       }
     }
   }
@@ -2031,6 +2056,7 @@ app.post("/api/brevo/sync-contacts", async (req, res) => {
       candidates: unique.length,
       synced: r.ok,
       failed: r.fail,
+      failedSamples: r.failedSamples,
     });
   } catch (e) {
     return res.status(500).json({ error: e?.message || "Erreur interne" });
