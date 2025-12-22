@@ -1,6 +1,7 @@
 import express from "express";
 import { createClient } from "@supabase/supabase-js";
 import webpush from "web-push";
+import apn from "apn";
 
 const router = express.Router();
 router.use(express.json());
@@ -28,6 +29,41 @@ const NOTIF_PROVIDER = process.env.NOTIFICATIONS_PROVIDER || "onesignal";
 const VAPID_PUBLIC_KEY = process.env.VAPID_PUBLIC_KEY;
 const VAPID_PRIVATE_KEY = process.env.VAPID_PRIVATE_KEY;
 const VAPID_SUBJECT = process.env.VAPID_SUBJECT || "mailto:contact@onekamer.co";
+
+// ======================
+// 🍎 APNs (iOS) config
+// ======================
+const APNS_TEAM_ID = process.env.APNS_TEAM_ID;
+const APNS_KEY_ID = process.env.APNS_KEY_ID;
+const APNS_BUNDLE_ID = process.env.APNS_BUNDLE_ID; // topic
+const APNS_PRIVATE_KEY = process.env.APNS_PRIVATE_KEY;
+const APNS_ENV = process.env.APNS_ENV || "sandbox"; // "sandbox" ou "production"
+
+let apnProvider = null;
+
+function getApnProvider() {
+  if (apnProvider) return apnProvider;
+
+  if (!APNS_TEAM_ID || !APNS_KEY_ID || !APNS_BUNDLE_ID || !APNS_PRIVATE_KEY) {
+    return null;
+  }
+
+  // Render peut stocker la clé avec des \n, on corrige au cas où
+  const key = APNS_PRIVATE_KEY.includes("\\n")
+    ? APNS_PRIVATE_KEY.replace(/\\n/g, "\n")
+    : APNS_PRIVATE_KEY;
+
+  apnProvider = new apn.Provider({
+    token: {
+      key,
+      keyId: APNS_KEY_ID,
+      teamId: APNS_TEAM_ID,
+    },
+    production: APNS_ENV === "production",
+  });
+
+  return apnProvider;
+}
 
 try {
   if (VAPID_PUBLIC_KEY && VAPID_PRIVATE_KEY) {
@@ -220,6 +256,75 @@ router.post("/supabase-notification", async (req, res) => {
     res.json({ success: true, sent });
   } catch (e) {
     res.status(500).json({ error: e?.message || "Erreur interne" });
+  }
+});
+
+// ======================
+// 🍎 Send iOS push (APNs)
+// ======================
+router.post("/push/send-ios", async (req, res) => {
+  if (NOTIF_PROVIDER !== "supabase_light") return res.status(200).json({ ignored: true });
+
+  try {
+    const provider = getApnProvider();
+    if (!provider) return res.status(200).json({ success: false, reason: "apns_not_configured" });
+
+    const supabaseClient = getSupabaseClient();
+    const { title, message, targetUserIds = [], data = {}, url = "/" } = req.body || {};
+
+    if (!title || !message || !Array.isArray(targetUserIds) || targetUserIds.length === 0) {
+      return res.status(400).json({ error: "title, message et targetUserIds requis" });
+    }
+
+    const { data: rows, error } = await supabaseClient
+      .from("push_device_tokens")
+      .select("user_id, device_token, platform, apns_environment")
+      .in("user_id", targetUserIds)
+      .eq("platform", "ios");
+
+    if (error) return res.status(500).json({ error: error.message });
+
+  if (!rows || rows.length === 0) {
+  return res.json({
+    success: true,
+    sent: 0,
+    failed: 0,
+    total: 0,
+    reason: "no_ios_tokens",
+  });
+}
+
+const note = new apn.Notification();
+note.topic = APNS_BUNDLE_ID;
+note.alert = { title, body: message };
+note.sound = "default";
+note.pushType = "alert";
+note.priority = 10;
+note.payload = { data, url };
+
+let sent = 0;
+let failed = 0;
+
+for (const t of rows) {
+  if (t.apns_environment && t.apns_environment !== APNS_ENV) continue;
+
+  try {
+    const result = await provider.send(note, t.device_token);
+    sent += result.sent?.length || 0;
+    failed += result.failed?.length || 0;
+  } catch (e) {
+    console.error("apns_send_error", {
+      user_id: t.user_id,
+      token: (t.device_token || "").slice(0, 10) + "...",
+      message: e?.message,
+    });
+    failed++;
+  }
+}
+
+return res.json({ success: true, sent, failed, total: rows.length });
+  } catch (e) {
+    return res.status(500).json({ error: e?.message || "Erreur interne" });
   }
 });
 
