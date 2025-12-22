@@ -37,7 +37,7 @@ const APNS_TEAM_ID = process.env.APNS_TEAM_ID;
 const APNS_KEY_ID = process.env.APNS_KEY_ID;
 const APNS_BUNDLE_ID = process.env.APNS_BUNDLE_ID; // topic
 const APNS_PRIVATE_KEY = process.env.APNS_PRIVATE_KEY;
-const APNS_ENV = process.env.APNS_ENV || "sandbox"; // "sandbox" ou "production"
+const APNS_ENV = (process.env.APNS_ENV || "sandbox").toLowerCase();
 
 let apnProvider = null;
 
@@ -266,6 +266,9 @@ router.post("/push/send-ios", async (req, res) => {
   if (NOTIF_PROVIDER !== "supabase_light") return res.status(200).json({ ignored: true });
 
   try {
+      if (!APNS_BUNDLE_ID) {
+      return res.status(500).json({ error: "missing_apns_bundle_id" });
+    }
     const provider = getApnProvider();
     if (!provider) return res.status(200).json({ success: false, reason: "apns_not_configured" });
 
@@ -294,19 +297,19 @@ router.post("/push/send-ios", async (req, res) => {
   });
 }
 
-const note = new apn.Notification();
-note.topic = APNS_BUNDLE_ID;
-note.alert = { title, body: message };
-note.sound = "default";
-note.pushType = "alert";
-note.priority = 10;
-note.payload = { data, url };
-
 let sent = 0;
 let failed = 0;
 
 for (const t of rows) {
   if (t.apns_environment && t.apns_environment !== APNS_ENV) continue;
+
+  const note = new apn.Notification();
+  note.topic = APNS_BUNDLE_ID;
+  note.alert = { title, body: message };
+  note.sound = "default";
+  note.pushType = "alert";
+  note.priority = 10;
+  note.payload = { data, url };
 
   try {
     const result = await provider.send(note, t.device_token);
@@ -323,6 +326,57 @@ for (const t of rows) {
 }
 
 return res.json({ success: true, sent, failed, total: rows.length });
+  } catch (e) {
+    return res.status(500).json({ error: e?.message || "Erreur interne" });
+  }
+});
+
+// ======================
+// 🍎 Register iOS token
+// ======================
+router.post("/push/register-device", async (req, res) => {
+  if (NOTIF_PROVIDER !== "supabase_light") return res.status(200).json({ ignored: true });
+
+  try {
+    const supabaseClient = getSupabaseClient();
+
+    const {
+      user_id,
+      device_token,
+      platform = "ios",
+      bundle_id = APNS_BUNDLE_ID,
+      apns_environment = APNS_ENV,
+      device_id = null,
+      device_model = null,
+      os_version = null,
+      app_version = null,
+    } = req.body || {};
+
+    if (!user_id || !device_token) {
+      return res.status(400).json({ error: "user_id et device_token requis" });
+    }
+
+    const { error } = await supabaseClient
+      .from("push_device_tokens")
+      .upsert(
+        [{
+          user_id,
+          device_token,
+          platform,
+          bundle_id,
+          apns_environment,
+          device_id,
+          device_model,
+          os_version,
+          app_version,
+          updated_at: new Date().toISOString(),
+        }],
+        { onConflict: "platform,device_token" }
+      );
+
+    if (error) return res.status(500).json({ error: error.message });
+
+    return res.json({ success: true });
   } catch (e) {
     return res.status(500).json({ error: e?.message || "Erreur interne" });
   }
