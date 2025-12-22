@@ -1905,6 +1905,139 @@ async function sendEmailViaBrevo({ to, subject, text }) {
 }
 
 // ============================================================
+// 👥 Contacts - Sync Supabase profiles -> Brevo List
+//   - Route sécurisée par header x-sync-secret
+//   - Upsert sur email (pas de doublons)
+// ============================================================
+
+const brevoSyncSecret = process.env.BREVO_SYNC_SECRET;
+const BREVO_LIST_ONEKAMER_BASE = 2;
+
+function isValidEmail(email) {
+  const e = String(email || "").trim();
+  if (!e) return false;
+  if (!e.includes("@")) return false;
+  if (e.length > 254) return false;
+  return true;
+}
+
+async function brevoUpsertContact({ email, username, listId }) {
+  if (!brevoApiKey) throw new Error("BREVO_API_KEY manquant");
+
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 20000);
+
+  try {
+    const payload = {
+      email,
+      updateEnabled: true,
+      listIds: [listId],
+      attributes: {},
+    };
+
+    const uname = String(username || "").trim();
+    if (uname) payload.attributes.USERNAME = uname;
+
+    const response = await fetch("https://api.brevo.com/v3/contacts", {
+      method: "POST",
+      headers: {
+        "api-key": brevoApiKey,
+        "Content-Type": "application/json",
+        accept: "application/json",
+      },
+      body: JSON.stringify(payload),
+      signal: controller.signal,
+    });
+
+    if (!response.ok) {
+      const errorText = await response.text();
+      throw new Error(`Brevo contacts API error ${response.status}: ${errorText}`);
+    }
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+async function mapLimit(items, limit, fn) {
+  const results = { ok: 0, fail: 0 };
+  let index = 0;
+
+  async function worker() {
+    while (index < items.length) {
+      const current = items[index++];
+      try {
+        await fn(current);
+        results.ok += 1;
+      } catch {
+        results.fail += 1;
+      }
+    }
+  }
+
+  const workers = Array.from({ length: Math.max(1, Math.min(limit, items.length)) }, () => worker());
+  await Promise.all(workers);
+  return results;
+}
+
+app.post("/api/brevo/sync-contacts", async (req, res) => {
+  try {
+    const got = String(req.headers["x-sync-secret"] || "");
+    if (!brevoSyncSecret || !got || got !== brevoSyncSecret) {
+      return res.status(401).json({ error: "unauthorized" });
+    }
+
+    const listId = BREVO_LIST_ONEKAMER_BASE;
+
+    const pageSize = 1000;
+    let offset = 0;
+    let scanned = 0;
+    let candidates = [];
+
+    while (true) {
+      const { data, error } = await supabase
+        .from("profiles")
+        .select("id, email, username")
+        .order("created_at", { ascending: true })
+        .range(offset, offset + pageSize - 1);
+
+      if (error) return res.status(500).json({ error: error.message || "profiles_read_failed" });
+
+      const rows = Array.isArray(data) ? data : [];
+      scanned += rows.length;
+      if (rows.length === 0) break;
+
+      for (const r of rows) {
+        const email = String(r?.email || "").trim().toLowerCase();
+        if (!isValidEmail(email)) continue;
+        candidates.push({ email, username: r?.username || null });
+      }
+
+      if (rows.length < pageSize) break;
+      offset += pageSize;
+    }
+
+    const byEmail = new Map();
+    for (const c of candidates) {
+      if (!byEmail.has(c.email)) byEmail.set(c.email, c);
+    }
+    const unique = Array.from(byEmail.values());
+
+    const concurrency = 10;
+    const r = await mapLimit(unique, concurrency, (c) => brevoUpsertContact({ ...c, listId }));
+
+    return res.json({
+      listId,
+      scanned,
+      candidates: unique.length,
+      synced: r.ok,
+      failed: r.fail,
+    });
+  } catch (e) {
+    return res.status(500).json({ error: e?.message || "Erreur interne" });
+  }
+});
+
+// ============================================================
 // 🔎 Journalisation auto (évènements sensibles) -> public.server_logs
 //   Colonnes attendues (recommandées) :
 //     id uuid default gen_random_uuid() PK
