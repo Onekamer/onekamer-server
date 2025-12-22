@@ -1,0 +1,54 @@
+name: Brevo Sync Contacts
+
+on:
+  schedule:
+    # Runs every 10 minutes. We only execute the sync when it's 10:00 in Europe/Paris.
+    - cron: "*/10 * * * *"
+  workflow_dispatch: {}
+
+concurrency:
+  group: brevo-sync-contacts
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Decide whether to run now (Europe/Paris 10:00)
+        id: gate
+        shell: bash
+        run: |
+          PARIS_TIME=$(TZ=Europe/Paris date +%H:%M)
+          echo "Paris time: $PARIS_TIME"
+          if [ "$PARIS_TIME" = "10:00" ]; then
+            echo "run=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "run=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Call Brevo sync endpoint
+        if: steps.gate.outputs.run == 'true'
+        shell: bash
+        env:
+          BREVO_SYNC_SECRET: ${{ secrets.BREVO_SYNC_SECRET }}
+          SYNC_URL: ${{ secrets.BREVO_SYNC_URL }}
+        run: |
+          if [ -z "$BREVO_SYNC_SECRET" ]; then
+            echo "Missing GitHub secret BREVO_SYNC_SECRET" >&2
+            exit 1
+          fi
+
+          URL=${SYNC_URL:-"https://onekamer-server.onrender.com/api/brevo/sync-contacts"}
+
+          curl -sS --fail \
+            --connect-timeout 20 \
+            --max-time 900 \
+            --retry 3 \
+            --retry-delay 5 \
+            --retry-all-errors \
+            -X POST "$URL" \
+            -H "Content-Type: application/json" \
+            -H "x-sync-secret: $BREVO_SYNC_SECRET" \
+            -d '{}'
