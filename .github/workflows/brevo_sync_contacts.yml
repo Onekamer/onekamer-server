@@ -4,7 +4,12 @@ on:
   schedule:
     # Runs every 10 minutes. We only execute the sync when it's 10:00 in Europe/Paris.
     - cron: "*/10 * * * *"
-  workflow_dispatch: {}
+  workflow_dispatch:
+    inputs:
+      force:
+        description: "Force sync now (ignores Europe/Paris 10:00 gate)"
+        required: false
+        default: "false"
 
 concurrency:
   group: brevo-sync-contacts
@@ -20,6 +25,13 @@ jobs:
         id: gate
         shell: bash
         run: |
+          FORCE_INPUT="${{ github.event.inputs.force }}"
+          if [ "$FORCE_INPUT" = "true" ]; then
+            echo "Force enabled via workflow_dispatch."
+            echo "run=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
           PARIS_TIME=$(TZ=Europe/Paris date +%H:%M)
           echo "Paris time: $PARIS_TIME"
           if [ "$PARIS_TIME" = "10:00" ]; then
