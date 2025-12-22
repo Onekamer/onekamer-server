@@ -1951,10 +1951,38 @@ async function brevoUpsertContact({ email, username, listId }) {
 
     if (!response.ok) {
       const errorText = await response.text();
-      throw new Error(`Brevo contacts API error ${response.status}: ${errorText}`);
+      const err = new Error(`Brevo contacts API error ${response.status}: ${errorText}`);
+      err.status = response.status;
+      err.brevoBody = errorText;
+      throw err;
     }
   } finally {
     clearTimeout(timeout);
+  }
+}
+
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function brevoUpsertContactWithRetry({ email, username, listId }) {
+  const maxAttempts = 5;
+
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    try {
+      await brevoUpsertContact({ email, username, listId });
+      return;
+    } catch (e) {
+      const status = Number(e?.status || 0);
+      const shouldRetry = status === 429 || (status >= 500 && status <= 599);
+      if (!shouldRetry || attempt === maxAttempts) throw e;
+
+      const base = 1000;
+      const maxDelay = 15000;
+      const delay = Math.min(maxDelay, base * Math.pow(2, attempt - 1));
+      const jitter = Math.floor(Math.random() * 250);
+      await sleep(delay + jitter);
+    }
   }
 }
 
@@ -2047,8 +2075,8 @@ app.post("/api/brevo/sync-contacts", async (req, res) => {
     }
     const unique = Array.from(byEmail.values());
 
-    const concurrency = 10;
-    const r = await mapLimit(unique, concurrency, (c) => brevoUpsertContact({ ...c, listId }));
+    const concurrency = 2;
+    const r = await mapLimit(unique, concurrency, (c) => brevoUpsertContactWithRetry({ ...c, listId }));
 
     return res.json({
       listId,
