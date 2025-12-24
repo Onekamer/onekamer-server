@@ -340,6 +340,46 @@ router.post("/push/register-device", async (req, res) => {
   try {
     const supabaseClient = getSupabaseClient();
 
+    const body = req.body || {};
+    const androidUserId = body.userId || body.user_id || body.uid || null;
+    const androidToken = body.token || body.device_token || body.deviceToken || null;
+    const androidPlatform = body.platform || body.os || null;
+    const androidDeviceId = body.deviceId || body.device_id || null;
+    const androidProvider = body.provider || "fcm";
+
+    if (androidUserId && androidToken && androidPlatform && String(androidPlatform).toLowerCase() !== "ios") {
+      const { data: prof, error: profErr } = await supabaseClient
+        .from("profiles")
+        .select("username, email")
+        .eq("id", androidUserId)
+        .maybeSingle();
+
+      if (profErr) return res.status(500).json({ error: "Erreur lecture profil" });
+
+      const now = new Date().toISOString();
+      const { error } = await supabaseClient
+        .from("device_push_tokens")
+        .upsert(
+          [{
+            user_id: androidUserId,
+            username: prof?.username || null,
+            email: prof?.email || null,
+            platform: String(androidPlatform),
+            provider: String(androidProvider || "fcm"),
+            token: String(androidToken),
+            device_id: androidDeviceId ? String(androidDeviceId) : null,
+            enabled: true,
+            last_seen_at: now,
+            updated_at: now,
+          }],
+          { onConflict: "token" }
+        );
+
+      if (error) return res.status(500).json({ error: error.message });
+
+      return res.json({ success: true });
+    }
+
     const {
       user_id,
       device_token,
