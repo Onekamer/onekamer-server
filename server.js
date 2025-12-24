@@ -18,6 +18,7 @@ import fixAnnoncesImagesRoute from "./api/fix-annonces-images.js";
 import fixEvenementsImagesRoute from "./api/fix-evenements-images.js";
 import pushRouter from "./api/push.js";
 import webpush from "web-push";
+import admin from "firebase-admin";
 import qrcodeRouter from "./api/qrcode.js";
 import cron from "node-cron";
 import { createFxService } from "./utils/fx.js";
@@ -2132,6 +2133,63 @@ async function logEvent({ category, action, status, userId = null, context = {} 
     }
   } catch (e) {
     console.warn("⚠️ Log insert exception:", e?.message || e);
+  }
+}
+
+function getFirebaseServiceAccountFromEnv() {
+  const raw = process.env.FIREBASE_SERVICE_ACCOUNT_JSON;
+  if (!raw) return null;
+  try {
+    if (raw.trim().startsWith("{")) return JSON.parse(raw);
+    const json = Buffer.from(raw, "base64").toString("utf8");
+    return JSON.parse(json);
+  } catch (_e) {
+    return null;
+  }
+}
+
+function initFirebaseAdminOnce() {
+  try {
+    if (admin.apps && admin.apps.length > 0) return true;
+    const sa = getFirebaseServiceAccountFromEnv();
+    if (!sa) return false;
+    admin.initializeApp({ credential: admin.credential.cert(sa) });
+    return true;
+  } catch (_e) {
+    return false;
+  }
+}
+
+async function sendNativeFcmToUsers({ targetUserIds = [], title = "OneKamer", message = "", url = "/", data = {} }) {
+  if (!Array.isArray(targetUserIds) || targetUserIds.length === 0) return { sent: 0, tokens: 0 };
+  if (!initFirebaseAdminOnce()) return { sent: 0, tokens: 0, skipped: "firebase_not_configured" };
+
+  const { data: rows, error } = await supabase
+    .from("device_push_tokens")
+    .select("token")
+    .in("user_id", targetUserIds)
+    .eq("enabled", true)
+    .eq("provider", "fcm");
+
+  if (error) return { sent: 0, tokens: 0, skipped: "tokens_read_error" };
+
+  const tokens = (rows || []).map((r) => r.token).filter(Boolean);
+  if (tokens.length === 0) return { sent: 0, tokens: 0 };
+
+  try {
+    const resp = await admin.messaging().sendEachForMulticast({
+      tokens,
+      notification: { title: title || "OneKamer", body: message || "" },
+      data: {
+        url: String(url || "/"),
+        payload: JSON.stringify(data || {}),
+      },
+    });
+
+    const sent = resp?.successCount ?? 0;
+    return { sent, tokens: tokens.length };
+  } catch (_e) {
+    return { sent: 0, tokens: tokens.length, skipped: "send_error" };
   }
 }
 
@@ -4536,14 +4594,135 @@ app.post("/push/subscribe", bodyParser.json(), async (req, res) => {
   }
 });
 
+app.post("/push/register-device", bodyParser.json(), async (req, res) => {
+  if (NOTIF_PROVIDER !== "supabase_light") return res.status(200).json({ ignored: true });
+
+  try {
+    const body = req.body || {};
+    const userId = body.userId || body.user_id || body.uid || null;
+    const token = body.token || body.device_token || body.deviceToken || null;
+    const platform = body.platform || body.os || null;
+    const deviceId = body.deviceId || body.device_id || null;
+    const provider = body.provider || "fcm";
+
+    if (!userId || !token || !platform) {
+      return res.status(400).json({
+        error: "userId/user_id, token/device_token et platform requis",
+      });
+    }
+
+    const { data: prof, error: profErr } = await supabase
+      .from("profiles")
+      .select("username, email")
+      .eq("id", userId)
+      .maybeSingle();
+
+    if (profErr) {
+      await logEvent({
+        category: "notifications",
+        action: "device.register",
+        status: "error",
+        userId,
+        context: { stage: "fetch_profile", error: profErr.message },
+      });
+      return res.status(500).json({ error: "Erreur lecture profil" });
+    }
+
+    const now = new Date().toISOString();
+    const { error: upErr } = await supabase.from("device_push_tokens").upsert(
+      {
+        user_id: userId,
+        username: prof?.username || null,
+        email: prof?.email || null,
+        platform: String(platform),
+        provider: String(provider || "fcm"),
+        token: String(token),
+        device_id: deviceId ? String(deviceId) : null,
+        enabled: true,
+        last_seen_at: now,
+        updated_at: now,
+      },
+      { onConflict: "token" }
+    );
+
+    if (upErr) {
+      await logEvent({
+        category: "notifications",
+        action: "device.register",
+        status: "error",
+        userId,
+        context: { stage: "upsert", error: upErr.message },
+      });
+      return res.status(500).json({ error: "Erreur enregistrement device" });
+    }
+
+    await logEvent({
+      category: "notifications",
+      action: "device.register",
+      status: "success",
+      userId,
+      context: { platform, deviceId: deviceId || null },
+    });
+
+    return res.json({ success: true });
+  } catch (e) {
+    await logEvent({
+      category: "notifications",
+      action: "device.register",
+      status: "error",
+      context: { error: e?.message || e },
+    });
+    return res.status(500).json({ error: e?.message || "Erreur interne" });
+  }
+});
+
+app.post("/push/unregister-device", bodyParser.json(), async (req, res) => {
+  if (NOTIF_PROVIDER !== "supabase_light") return res.status(200).json({ ignored: true });
+
+  try {
+    const { userId, token } = req.body || {};
+    if (!token) return res.status(400).json({ error: "token requis" });
+
+    const now = new Date().toISOString();
+    const { error } = await supabase
+      .from("device_push_tokens")
+      .update({ enabled: false, updated_at: now })
+      .eq("token", token);
+
+    if (error) {
+      await logEvent({
+        category: "notifications",
+        action: "device.unregister",
+        status: "error",
+        userId: userId || null,
+        context: { error: error.message },
+      });
+      return res.status(500).json({ error: "Erreur désinscription device" });
+    }
+
+    await logEvent({
+      category: "notifications",
+      action: "device.unregister",
+      status: "success",
+      userId: userId || null,
+    });
+
+    return res.json({ success: true });
+  } catch (e) {
+    await logEvent({
+      category: "notifications",
+      action: "device.unregister",
+      status: "error",
+      userId: req.body?.userId || null,
+      context: { error: e?.message || e },
+    });
+    return res.status(500).json({ error: e?.message || "Erreur interne" });
+  }
+});
+
 // Dispatch notification: insert + envoi Web Push
 app.post("/notifications/dispatch", async (req, res) => {
   if (NOTIF_PROVIDER !== "supabase_light") return res.status(200).json({ ignored: true });
-
-  if (!VAPID_PUBLIC_KEY || !VAPID_PRIVATE_KEY) {
-    console.warn("⚠️ Dispatch refusé: VAPID non configuré");
-    return res.status(200).json({ success: false, reason: "vapid_not_configured" });
-  }
 
   try {
     const { title, message, targetUserIds = [], data = {}, url = "/" } = req.body || {};
@@ -4559,30 +4738,49 @@ app.post("/notifications/dispatch", async (req, res) => {
       console.warn("⚠️ Insert notifications (best-effort) erreur:", e?.message || e);
     }
 
-    const { data: subs, error: subErr } = await supabase
-      .from("push_subscriptions")
-      .select("user_id, endpoint, p256dh, auth")
-      .in("user_id", targetUserIds);
-    if (subErr) console.warn("⚠️ Lecture subscriptions échouée:", subErr.message);
+    let sentWeb = 0;
+    if (VAPID_PUBLIC_KEY && VAPID_PRIVATE_KEY) {
+      const { data: subs, error: subErr } = await supabase
+        .from("push_subscriptions")
+        .select("user_id, endpoint, p256dh, auth")
+        .in("user_id", targetUserIds);
+      if (subErr) console.warn("⚠️ Lecture subscriptions échouée:", subErr.message);
 
-    const icon = "https://onekamer-media-cdn.b-cdn.net/logo/IMG_0885%202.PNG";
-    const badge = "https://onekamer-media-cdn.b-cdn.net/android-chrome-72x72.png";
-    const payload = (uid) => JSON.stringify({ title: title || "OneKamer", body: message, icon, badge, url, data });
+      const icon = "https://onekamer-media-cdn.b-cdn.net/logo/IMG_0885%202.PNG";
+      const badge = "https://onekamer-media-cdn.b-cdn.net/android-chrome-72x72.png";
+      const payload = (uid) => JSON.stringify({ title: title || "OneKamer", body: message, icon, badge, url, data });
 
-    let sent = 0;
-    if (Array.isArray(subs)) {
-      for (const s of subs) {
-        try {
-          await webpush.sendNotification({ endpoint: s.endpoint, expirationTime: null, keys: { p256dh: s.p256dh, auth: s.auth } }, payload(s.user_id));
-          sent++;
-        } catch (e) {
-          console.warn("⚠️ Échec envoi push à", s.user_id, e?.statusCode || e?.message || e);
+      if (Array.isArray(subs)) {
+        for (const s of subs) {
+          try {
+            await webpush.sendNotification(
+              { endpoint: s.endpoint, expirationTime: null, keys: { p256dh: s.p256dh, auth: s.auth } },
+              payload(s.user_id)
+            );
+            sentWeb++;
+          } catch (e) {
+            console.warn("⚠️ Échec envoi push à", s.user_id, e?.statusCode || e?.message || e);
+          }
         }
       }
     }
 
-    await logEvent({ category: "notifications", action: "dispatch", status: "success", context: { target_count: targetUserIds.length, sent } });
-    res.json({ success: true, sent });
+    const nativeResult = await sendNativeFcmToUsers({ title, message, targetUserIds, data, url });
+
+    await logEvent({
+      category: "notifications",
+      action: "dispatch",
+      status: "success",
+      context: {
+        target_count: targetUserIds.length,
+        sent_web: sentWeb,
+        sent_native: nativeResult?.sent ?? 0,
+        native_tokens: nativeResult?.tokens ?? 0,
+        native_skipped: nativeResult?.skipped ?? null,
+      },
+    });
+
+    res.json({ success: true, sentWeb, native: nativeResult });
   } catch (e) {
     console.error("❌ Erreur /notifications/dispatch:", e);
     await logEvent({ category: "notifications", action: "dispatch", status: "error", context: { error: e?.message || e } });
@@ -4616,6 +4814,18 @@ app.post("/api/supabase-notification", (req, res, next) => {
 app.post("/api/push/unsubscribe", (req, res, next) => {
   logAliasOnce("🔁 Alias activé : /api/push/unsubscribe → /push/unsubscribe");
   req.url = "/push/unsubscribe";
+  app._router.handle(req, res, next);
+});
+
+app.post("/api/push/register-device", (req, res, next) => {
+  logAliasOnce("🔁 Alias activé : /api/push/register-device → /push/register-device");
+  req.url = "/push/register-device";
+  app._router.handle(req, res, next);
+});
+
+app.post("/api/push/unregister-device", (req, res, next) => {
+  logAliasOnce("🔁 Alias activé : /api/push/unregister-device → /push/unregister-device");
+  req.url = "/push/unregister-device";
   app._router.handle(req, res, next);
 });
 
