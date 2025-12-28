@@ -280,10 +280,12 @@ router.post("/push/send-ios", async (req, res) => {
     }
 
     const { data: rows, error } = await supabaseClient
-      .from("push_device_tokens")
-      .select("user_id, device_token, platform, apns_environment")
-      .in("user_id", targetUserIds)
-      .eq("platform", "ios");
+     .from("device_push_tokens")
+     .select("user_id, token, platform, enabled, provider")
+     .in("user_id", targetUserIds)
+     .eq("platform", "ios")
+     .eq("provider", "apns")
+     .eq("enabled", true);
 
     if (error) return res.status(500).json({ error: error.message });
 
@@ -301,8 +303,7 @@ let sent = 0;
 let failed = 0;
 
 for (const t of rows) {
-  if (t.apns_environment && t.apns_environment !== APNS_ENV) continue;
-
+  
   const note = new apn.Notification();
   note.topic = APNS_BUNDLE_ID;
   note.alert = { title, body: message };
@@ -312,13 +313,13 @@ for (const t of rows) {
   note.payload = { data, url };
 
   try {
-    const result = await provider.send(note, t.device_token);
+    const result = await provider.send(note, t.token);
     sent += result.sent?.length || 0;
     failed += result.failed?.length || 0;
   } catch (e) {
     console.error("apns_send_error", {
       user_id: t.user_id,
-      token: (t.device_token || "").slice(0, 10) + "...",
+      token: (t.token || "").slice(0, 10) + "...",
       message: e?.message,
     });
     failed++;
@@ -341,13 +342,15 @@ router.post("/push/register-device", async (req, res) => {
     const supabaseClient = getSupabaseClient();
 
     const body = req.body || {};
+    const rawPlatform = body.platform || body.os || "";
+    const normalizedPlatform = String(rawPlatform).toLowerCase();
     const androidUserId = body.userId || body.user_id || body.uid || null;
     const androidToken = body.token || body.device_token || body.deviceToken || null;
     const androidPlatform = body.platform || body.os || null;
     const androidDeviceId = body.deviceId || body.device_id || null;
     const androidProvider = body.provider || "fcm";
 
-    if (androidUserId && androidToken && androidPlatform && String(androidPlatform).toLowerCase() !== "ios") {
+    if (androidUserId && androidToken && normalizedPlatform !== "ios") {
       const { data: prof, error: profErr } = await supabaseClient
         .from("profiles")
         .select("username, email")
@@ -383,9 +386,6 @@ router.post("/push/register-device", async (req, res) => {
     const {
       user_id,
       device_token,
-      platform = "ios",
-      bundle_id = APNS_BUNDLE_ID,
-      apns_environment = APNS_ENV,
       device_id = null,
       device_model = null,
       os_version = null,
@@ -396,22 +396,32 @@ router.post("/push/register-device", async (req, res) => {
       return res.status(400).json({ error: "user_id et device_token requis" });
     }
 
+    const now = new Date().toISOString();
+
+    const { data: prof, error: profErr } = await supabaseClient
+     .from("profiles")
+     .select("username, email")
+     .eq("id", user_id)
+     .maybeSingle();
+
+  if (profErr) return res.status(500).json({ error: "Erreur lecture profil" });
+
     const { error } = await supabaseClient
-      .from("push_device_tokens")
+      .from("device_push_tokens")
       .upsert(
         [{
           user_id,
-          device_token,
-          platform,
-          bundle_id,
-          apns_environment,
-          device_id,
-          device_model,
-          os_version,
-          app_version,
-          updated_at: new Date().toISOString(),
+          username: prof?.username || null,
+          email: prof?.email || null,
+          platform: "ios",
+          provider: "apns",
+          token: String(device_token),
+          device_id: device_id ? String(device_id) : null,
+          enabled: true,
+          last_seen_at: now,
+          updated_at: now,
         }],
-        { onConflict: "platform,device_token" }
+        { onConflict: "token" }
       );
 
     if (error) return res.status(500).json({ error: error.message });
