@@ -412,7 +412,7 @@ router.post("/push/register-device", async (req, res) => {
 
     if (error) return res.status(500).json({ error: error.message });
 
-    return res.json({ success: true, version: "2025-12-29-01", branch: "ios", provider: "apns" });
+    return res.json({ success: true, version: "2025-12-29-01", branch: "ios", provider: "apns", normalizedPlatform });
     }
     // ======================
     // 🍎 iOS (fin)
