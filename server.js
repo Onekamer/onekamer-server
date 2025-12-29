@@ -56,16 +56,9 @@ const corsOptions = {
     return callback(new Error("Non autorisé par CORS"));
   },
   methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
-  allowedHeaders: [
-    "Content-Type",
-    "Authorization",
-    "apikey",
-    "X-Client-Info",
-    "X-Requested-With",
-    "Accept",
-    "x-admin-token",
-  ],
+  // ✅ IMPORTANT: ne pas fixer allowedHeaders, sinon tu te fais piéger
   credentials: true,
+  optionsSuccessStatus: 204,
   };
 
 app.use(cors(corsOptions));
