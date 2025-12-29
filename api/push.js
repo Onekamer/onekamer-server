@@ -368,9 +368,16 @@ router.post("/push/register-device", async (req, res) => {
     // 🍎 iOS (début)
     // ======================
   if (normalizedPlatform === "ios"){
+    console.log("[register-device][IOS] ENTER");
+    console.log("[register-device][IOS] normalizedPlatform =", normalizedPlatform);
+    console.log("[register-device][IOS] user_id =", user_id);
     if (!user_id || !device_token) {
       return res.status(400).json({ error: "user_id et device_token requis" });
     }
+    console.log(
+  "[register-device][IOS] device_token prefix =",
+  String(device_token || "").slice(0, 12)
+);
 
     const now = new Date().toISOString();
 
@@ -402,7 +409,7 @@ router.post("/push/register-device", async (req, res) => {
 
     if (error) return res.status(500).json({ error: error.message });
 
-    return res.json({ success: true });
+    return res.json({ success: true, branch: "ios", provider: "apns" });
     }
     // ======================
     // 🍎 iOS (fin)
