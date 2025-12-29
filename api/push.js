@@ -337,11 +337,13 @@ return res.json({ success: true, sent, failed, total: rows.length });
 // ======================
 
 router.post("/push/register-device", async (req, res) => {
+  res.setHeader("X-Push-Version", "2025-12-29-01");
+  res.setHeader("X-Push-File", "push.js");
+  res.setHeader("Access-Control-Expose-Headers", "X-Push-Version, X-Push-File");
+  
   if (NOTIF_PROVIDER !== "supabase_light") return res.status(200).json({ ignored: true });
 
   try {
-    res.setHeader("X-Push-Version", "2025-12-29-01");
-    res.setHeader("X-Push-File", "push.js");
     const supabaseClient = getSupabaseClient();
 
     const body = req.body || {};
@@ -444,7 +446,7 @@ router.post("/push/register-device", async (req, res) => {
     // 🤖 ANDROID (début)
     // ======================
 
-    if (androidUserId && androidToken && normalizedPlatform !== "ios") {
+    if (normalizedPlatform === "android" && androidUserId && androidToken) {
       const { data: prof, error: profErr } = await supabaseClient
         .from("profiles")
         .select("username, email")
