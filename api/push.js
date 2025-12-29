@@ -6,6 +6,11 @@ import apn from "apn";
 const router = express.Router();
 router.use(express.json());
 
+router.get("/push/ping", (req, res) => {
+res.setHeader("X-Push-Version", "2025-12-29-01");
+return res.status(200).json({ ok: true, from: "push.js", at: Date.now() });
+});
+
 // ✅ Initialisation paresseuse de Supabase pour éviter de faire planter le serveur
 // si les variables d'environnement sont absentes ou mal configurées.
 let supabase = null;
