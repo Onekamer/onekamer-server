@@ -29,6 +29,7 @@ const fetch = globalThis.fetch;
 // ✅ CONFIGURATION CORS — OneKamer Render + Horizon
 // =======================================================
 const app = express();
+app.set("trust proxy", 1);
 const NOTIF_PROVIDER = process.env.NOTIFICATIONS_PROVIDER || "onesignal";
 // 🔹 Récupération et gestion de plusieurs origines depuis l'environnement
 const allowedOrigins = process.env.CORS_ORIGIN
@@ -36,32 +37,37 @@ const allowedOrigins = process.env.CORS_ORIGIN
   : [
       "https://onekamer.co",                        // Horizon (production)
       "https://onekamer-front-render.onrender.com", // Render (test/labo)
+       // ✅ Capacitor / Ionic WebView
+      "capacitor://localhost",
+      "ionic://localhost",
+      "http://localhost",
+      "https://localhost",
     ];
 
-app.use(
-  cors({
-    origin: function (origin, callback) {
-      // Autorise les appels sans origin (ex: Postman, tests internes)
-      if (!origin) return callback(null, true);
+const corsOptions = {
+  origin: function (origin, callback) {
+    if (!origin) return callback(null, true);
 
-      if (allowedOrigins.includes(origin)) {
-        callback(null, true);
-      } else {
-        console.warn(`🚫 CORS refusé pour l'origine : ${origin}`);
-        callback(new Error("Non autorisé par CORS"));
-      }
-    },
-    methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
-    allowedHeaders: [
-      "Content-Type",
-      "Authorization",
-      "X-Requested-With",
-      "Accept",
-      "x-admin-token",
-    ],
-    credentials: true,
-  })
-);
+    if (allowedOrigins.includes(origin)) {
+      return callback(null, true);
+    }
+
+    console.warn(`🚫 CORS refusé pour l'origine : ${origin}`);
+    return callback(new Error("Non autorisé par CORS"));
+  },
+  methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+  allowedHeaders: [
+    "Content-Type",
+    "Authorization",
+    "X-Requested-With",
+    "Accept",
+    "x-admin-token",
+  ],
+  credentials: true,
+  };
+
+app.use(cors(corsOptions));
+app.options("*", cors(corsOptions)); // ✅ Preflight
 
 console.log("✅ CORS actif pour :", allowedOrigins.join(", "));
 
