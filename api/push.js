@@ -335,9 +335,9 @@ return res.json({ success: true, sent, failed, total: rows.length });
 // ======================
 // Register token
 // ======================
-console.log("🔥 REGISTER-DEVICE HIT 🔥");
 
 router.post("/push/register-device", async (req, res) => {
+  console.log("🔥 REGISTER-DEVICE HIT 🔥");
   if (NOTIF_PROVIDER !== "supabase_light") return res.status(200).json({ ignored: true });
 
   try {
