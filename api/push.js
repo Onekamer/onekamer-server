@@ -364,6 +364,8 @@ router.post("/push/register-device", async (req, res) => {
       app_version = null,
     } = req.body || {};
 
+    console.log("[register-device] VERSION=2025-12-29-01");
+
      // ======================
     // 🍎 iOS (début)
     // ======================
@@ -409,7 +411,7 @@ router.post("/push/register-device", async (req, res) => {
 
     if (error) return res.status(500).json({ error: error.message });
 
-    return res.json({ success: true, branch: "ios", provider: "apns" });
+    return res.json({ success: true, version: "2025-12-29-01", branch: "ios", provider: "apns" });
     }
     // ======================
     // 🍎 iOS (fin)
