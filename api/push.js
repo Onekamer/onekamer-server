@@ -349,9 +349,31 @@ router.post("/push/register-device", async (req, res) => {
     
     const rawPlatform = body.platform || body.os || "";
     const normalizedPlatform = String(rawPlatform).toLowerCase().trim();
+    const trace = {
+  version: "2025-12-29-01",
+  rawPlatform,
+  normalizedPlatform,
+  has: {
+    token: !!body.token,
+    deviceToken: !!body.deviceToken,
+    device_token: !!body.device_token,
+    device_token_camel: !!body.device_token,
+    device_token_sent: !!body.device_token,
+    device_token_from_body: !!body.device_token,
+    device_token_from_req: !!req.body?.device_token,
+    device_token_key: Object.prototype.hasOwnProperty.call(body, "device_token"),
+    deviceToken_key: Object.prototype.hasOwnProperty.call(body, "deviceToken"),
+    token_key: Object.prototype.hasOwnProperty.call(body, "token"),
+  },
+  ids: {
+    body_user_id: body.user_id,
+    body_uid: body.uid,
+  },
+  user_id: body.user_id || body.userId || body.uid || null,
+  };
     
     const androidUserId = body.userId || body.user_id || body.uid || null;
-    const androidToken = body.token || body.device_token || body.deviceToken || null;
+    const androidToken = body.token || body.deviceToken || null;
     const androidPlatform = body.platform || body.os || null;
     const androidDeviceId = body.deviceId || body.device_id || null;
     const androidProvider = body.provider || "fcm";
@@ -365,8 +387,6 @@ router.post("/push/register-device", async (req, res) => {
       app_version = null,
     } = req.body || {};
 
-    console.log("[register-device] VERSION=2025-12-29-01");
-
      // ======================
     // 🍎 iOS (début)
     // ======================
@@ -375,7 +395,7 @@ router.post("/push/register-device", async (req, res) => {
     console.log("[register-device][IOS] normalizedPlatform =", normalizedPlatform);
     console.log("[register-device][IOS] user_id =", user_id);
     if (!user_id || !device_token) {
-      return res.status(400).json({ error: "user_id et device_token requis" });
+      return res.status(400).json({ error: "user_id et device_token requis", trace });
     }
     console.log(
   "[register-device][IOS] device_token prefix =",
@@ -412,7 +432,7 @@ router.post("/push/register-device", async (req, res) => {
 
     if (error) return res.status(500).json({ error: error.message });
 
-    return res.json({ success: true, branch: "ios", provider: "apns", normalizedPlatform });
+    return res.json({ success: true, branch: "ios", provider: "apns", trace });
     }
     // ======================
     // 🍎 iOS (fin)
@@ -452,13 +472,13 @@ router.post("/push/register-device", async (req, res) => {
 
       if (error) return res.status(500).json({ error: error.message });
 
-      return res.json({ success: true, branch: "android", provider: "fcm", normalizedPlatform });
+      return res.json({ success: true, branch: "android", provider: "fcm", trace });
     }
     // ======================
     // 🤖 ANDROID (fin)
     // ======================
 
-    return res.status(400).json({ error: "platform invalide (ios / android)" });
+    return res.status(400).json({ error: "platform invalide (ios / android)", trace});
   } catch (e) {
     return res.status(500).json({ error: e?.message || "Erreur interne" });
   }
