@@ -340,6 +340,15 @@ router.post("/push/register-device", async (req, res) => {
   res.setHeader("X-Push-Version", "2025-12-29-01");
   res.setHeader("X-Push-File", "push.js");
   res.setHeader("Access-Control-Expose-Headers", "X-Push-Version, X-Push-File");
+
+  if (process.env.PUSH_CANARY === "1") {
+    return res.status(418).json({
+      ok: false,
+      hit: "push.js register-device",
+      at: Date.now(),
+      path: req.originalUrl,
+    });
+  }
   
   if (NOTIF_PROVIDER !== "supabase_light") return res.status(200).json({ ignored: true });
 
