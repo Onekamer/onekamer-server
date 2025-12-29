@@ -340,6 +340,8 @@ router.post("/push/register-device", async (req, res) => {
   if (NOTIF_PROVIDER !== "supabase_light") return res.status(200).json({ ignored: true });
 
   try {
+    res.setHeader("X-Push-Version", "2025-12-29-01");
+    res.setHeader("X-Push-File", "push.js");
     const supabaseClient = getSupabaseClient();
 
     const body = req.body || {};
