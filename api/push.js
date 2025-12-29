@@ -333,7 +333,7 @@ return res.json({ success: true, sent, failed, total: rows.length });
 });
 
 // ======================
-// 🍎 Register iOS token
+// Register token
 // ======================
 router.post("/push/register-device", async (req, res) => {
   if (NOTIF_PROVIDER !== "supabase_light") return res.status(200).json({ ignored: true });
@@ -342,46 +342,18 @@ router.post("/push/register-device", async (req, res) => {
     const supabaseClient = getSupabaseClient();
 
     const body = req.body || {};
+    console.log("[register-device] body=", body);
+    console.log("[register-device] platform=", body.platform, "os=", body.os);
+    console.log("[register-device] user_id=", body.user_id, "device_token?", !!body.device_token, "token?", !!body.token);
+    
     const rawPlatform = body.platform || body.os || "";
-    const normalizedPlatform = String(rawPlatform).toLowerCase();
+    const normalizedPlatform = String(rawPlatform).toLowerCase().trim();
+    
     const androidUserId = body.userId || body.user_id || body.uid || null;
     const androidToken = body.token || body.device_token || body.deviceToken || null;
     const androidPlatform = body.platform || body.os || null;
     const androidDeviceId = body.deviceId || body.device_id || null;
     const androidProvider = body.provider || "fcm";
-
-    if (androidUserId && androidToken && normalizedPlatform !== "ios") {
-      const { data: prof, error: profErr } = await supabaseClient
-        .from("profiles")
-        .select("username, email")
-        .eq("id", androidUserId)
-        .maybeSingle();
-
-      if (profErr) return res.status(500).json({ error: "Erreur lecture profil" });
-
-      const now = new Date().toISOString();
-      const { error } = await supabaseClient
-        .from("device_push_tokens")
-        .upsert(
-          [{
-            user_id: androidUserId,
-            username: prof?.username || null,
-            email: prof?.email || null,
-            platform: String(androidPlatform),
-            provider: String(androidProvider || "fcm"),
-            token: String(androidToken),
-            device_id: androidDeviceId ? String(androidDeviceId) : null,
-            enabled: true,
-            last_seen_at: now,
-            updated_at: now,
-          }],
-          { onConflict: "token" }
-        );
-
-      if (error) return res.status(500).json({ error: error.message });
-
-      return res.json({ success: true });
-    }
 
     const {
       user_id,
@@ -392,6 +364,10 @@ router.post("/push/register-device", async (req, res) => {
       app_version = null,
     } = req.body || {};
 
+     // ======================
+    // 🍎 iOS (début)
+    // ======================
+  if (normalizedPlatform === "ios"){
     if (!user_id || !device_token) {
       return res.status(400).json({ error: "user_id et device_token requis" });
     }
@@ -427,10 +403,55 @@ router.post("/push/register-device", async (req, res) => {
     if (error) return res.status(500).json({ error: error.message });
 
     return res.json({ success: true });
+    }
+    // ======================
+    // 🍎 iOS (fin)
+    // ======================
+
+    // ======================
+    // 🤖 ANDROID (début)
+    // ======================
+
+    if (androidUserId && androidToken && normalizedPlatform !== "ios") {
+      const { data: prof, error: profErr } = await supabaseClient
+        .from("profiles")
+        .select("username, email")
+        .eq("id", androidUserId)
+        .maybeSingle();
+
+      if (profErr) return res.status(500).json({ error: "Erreur lecture profil" });
+
+      const now = new Date().toISOString();
+      const { error } = await supabaseClient
+        .from("device_push_tokens")
+        .upsert(
+          [{
+            user_id: androidUserId,
+            username: prof?.username || null,
+            email: prof?.email || null,
+            platform: String(androidPlatform),
+            provider: String(androidProvider || "fcm"),
+            token: String(androidToken),
+            device_id: androidDeviceId ? String(androidDeviceId) : null,
+            enabled: true,
+            last_seen_at: now,
+            updated_at: now,
+          }],
+          { onConflict: "token" }
+        );
+
+      if (error) return res.status(500).json({ error: error.message });
+
+      return res.json({ success: true });
+    }
+    // ======================
+    // 🤖 ANDROID (fin)
+    // ======================
+
+    return res.status(400).json({ error: "platform invalide (ios / android)" });
   } catch (e) {
     return res.status(500).json({ error: e?.message || "Erreur interne" });
   }
 });
 
 export default router;
-
