@@ -59,6 +59,8 @@ const corsOptions = {
   allowedHeaders: [
     "Content-Type",
     "Authorization",
+    "apikey",
+    "X-Client-Info",
     "X-Requested-With",
     "Accept",
     "x-admin-token",
