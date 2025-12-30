@@ -52,13 +52,6 @@ const corsOptions = {
     if (allowedOrigins.includes(origin)) {
       return callback(null, true);
     }
-
-app.use((req, res, next) => {
-  if (req.originalUrl === "/webhook") return next();
-  return bodyParser.json()(req, res, next);
-});
-app.use(bodyParser.urlencoded({ extended: true }));
-
     console.warn(`🚫 CORS refusé pour l'origine : ${origin}`);
     return callback(new Error("Non autorisé par CORS"));
   },
@@ -72,6 +65,16 @@ app.use(cors(corsOptions));
 app.options("*", cors(corsOptions)); // ✅ Preflight
 
 console.log("✅ CORS actif pour :", allowedOrigins.join(", "));
+
+// 1) Stripe webhook RAW AVANT tout parser JSON
+app.post("/webhook", express.raw({ type: "application/json" }), stripeWebhookHandler);
+
+// 2) Parsers JSON / urlencoded pour le reste
+app.use(express.json());
+app.use(express.urlencoded({ extended: true }));
+
+// 3) Health check
+app.get("/health", (_req, res) => res.status(200).send("ok"));
 
 app.use("/api", uploadRoute);
 app.use("/api", partenaireDefaultsRoute);
@@ -2301,7 +2304,7 @@ async function sendAdminWithdrawalPush(req, { username, amount }) {
 // 1️⃣ Webhook Stripe (OK COINS + Abonnements)
 // ============================================================
 
-app.post("/webhook", bodyParser.raw({ type: "application/json" }), async (req, res) => {
+async function stripeWebhookHandler(req, res) => {
   const sig = req.headers["stripe-signature"];
   const endpointSecret = process.env.STRIPE_WEBHOOK_SECRET;
   let event;
