@@ -20,6 +20,7 @@ import pushRouter from "./api/push.js";
 import webpush from "web-push";
 import admin from "firebase-admin";
 import qrcodeRouter from "./api/qrcode.js";
+import iapRouter from "./api/iap.js";
 import cron from "node-cron";
 import { createFxService } from "./utils/fx.js";
 
@@ -52,6 +53,12 @@ const corsOptions = {
       return callback(null, true);
     }
 
+app.use((req, res, next) => {
+  if (req.originalUrl === "/webhook") return next();
+  return bodyParser.json()(req, res, next);
+});
+app.use(bodyParser.urlencoded({ extended: true }));
+
     console.warn(`🚫 CORS refusé pour l'origine : ${origin}`);
     return callback(new Error("Non autorisé par CORS"));
   },
@@ -72,6 +79,7 @@ app.use("/api", fixAnnoncesImagesRoute);
 app.use("/api", fixEvenementsImagesRoute);
 app.use("/api", pushRouter);
 app.use("/api", qrcodeRouter);
+app.use("/api", iapRouter);
 
 // ============================================================
 // 🔑 Stripe
@@ -2880,9 +2888,6 @@ app.post("/push/unsubscribe", bodyParser.json(), async (req, res) => {
 // ============================================================
 // 2️⃣ Création de session Stripe - OK COINS
 // ============================================================
-
-app.use(bodyParser.json());
-app.use(bodyParser.urlencoded({ extended: true }));
 
 // ============================================================
 // 🧹 Admin : suppression posts Échange communautaire (PROD)
