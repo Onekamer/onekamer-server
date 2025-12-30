@@ -2853,7 +2853,7 @@ async function stripeWebhookHandler(req, res) {
     });
     res.status(500).send("Erreur serveur interne");
   }
-});
+}
 
 // Désinscription de l'appareil courant (suppression par endpoint)
 app.post("/push/unsubscribe", bodyParser.json(), async (req, res) => {
