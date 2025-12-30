@@ -24,7 +24,7 @@
     "web-push": "^3.6.6"
   },
   "engines": {
-    "node": ">=20.x"
+    "node": "20.x"
   },
   "author": "William Soppo & Annaëlle Bilounga",
   "license": "MIT"
