@@ -2318,7 +2318,7 @@ async function stripeWebhookHandler(req, res) {
       action: "webhook.verify",
       status: "error",
       context: { error: err.message },
-    }
+    });
     return res.status(400).send(`Webhook Error: ${err.message}`);
   }
 
