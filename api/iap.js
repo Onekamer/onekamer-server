@@ -270,7 +270,7 @@ async function applyBusinessEffect({ userId, mapping, purchasedAt, expiresAt }) 
 /* =========================
    Route handler (COMMUN)
 ========================= */
-router.post("/verify", async (req, res) => {
+router.post("/iap/verify", async (req, res) => {
   try {
     const { platform, provider, userId, transactionId } = req.body || {};
 
