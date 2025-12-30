@@ -57,7 +57,7 @@ function appleBaseUrl() {
  * Output standardisé: { providerTxId, originalTxId, storeProductId, purchasedAt, expiresAt, raw }
  */
 async function verifyWithApple(transactionId) {
-  const jwt = getAppleJwt();
+  const jwt = generateAppleJwt();
   const url = `${appleBaseUrl()}/inApps/v1/transactions/${encodeURIComponent(
     transactionId
   )}`;
