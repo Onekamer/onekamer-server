@@ -2304,7 +2304,7 @@ async function sendAdminWithdrawalPush(req, { username, amount }) {
 // 1️⃣ Webhook Stripe (OK COINS + Abonnements)
 // ============================================================
 
-async function stripeWebhookHandler(req, res) => {
+async function stripeWebhookHandler(req, res) {
   const sig = req.headers["stripe-signature"];
   const endpointSecret = process.env.STRIPE_WEBHOOK_SECRET;
   let event;
@@ -2318,7 +2318,7 @@ async function stripeWebhookHandler(req, res) => {
       action: "webhook.verify",
       status: "error",
       context: { error: err.message },
-    });
+    }
     return res.status(400).send(`Webhook Error: ${err.message}`);
   }
 
