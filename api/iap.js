@@ -1,7 +1,7 @@
 // api/iap.js
 import express from "express";
 import { createClient } from "@supabase/supabase-js";
-import { getAppleJwt } from "../utils/appleJwt.js";
+import { generateAppleJwt } from "../utils/appleJwt.js";
 
 const router = express.Router();
 
