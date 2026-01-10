@@ -89,6 +89,9 @@ async function verifyWithApple(transactionId) {
   }
 
   if (!res.ok) {
+    const wwwAuth = res.headers.get("www-authenticate") || "";
+    const dateHdr = res.headers.get("date") || "";
+    console.error(`[IAP][Apple] verify hdr www-authenticate=${wwwAuth} date=${dateHdr}`);
     console.error(`[IAP][Apple] verify error status=${res.status} host=${base} body=${text?.slice(0,2000) || ""}`);
     const msg =
       json?.errorMessage || json?.message || json?.error || `Apple API error (${res.status})`;
