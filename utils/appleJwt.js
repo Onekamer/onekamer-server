@@ -13,6 +13,15 @@ export function generateAppleJwt() {
   const keyId = process.env.APPLE_KEY_ID;
   let privateKey = process.env.APPLE_PRIVATE_KEY;
 
+  try {
+    const orig = String(privateKey || "");
+    const preHasEscNL = /\\n/.test(orig);
+    const preHasRealNL = orig.includes("\n");
+    const hasBegin = /BEGIN PRIVATE KEY/.test(orig);
+    const hasEnd = /END PRIVATE KEY/.test(orig);
+    console.info(`[IAP][PK] kid=${keyId} iss=${issuerId} preLen=${orig.length} begin=${hasBegin} end=${hasEnd} escNL=${preHasEscNL} realNL=${preHasRealNL}`);
+  } catch {}
+
   if (!issuerId || !keyId || !privateKey) {
     throw new Error(
       "Missing Apple env vars. Need APPLE_ISSUER_ID, APPLE_KEY_ID, APPLE_PRIVATE_KEY"
@@ -21,6 +30,12 @@ export function generateAppleJwt() {
 
   // Si la clé est stockée en env avec des \n, on reconvertit en vrais retours à la ligne
   privateKey = privateKey.replace(/\\n/g, "\n");
+
+  try {
+    const post = String(privateKey || "");
+    const postHasRealNL = post.includes("\n");
+    console.info(`[IAP][PK] postLen=${post.length} realNL=${postHasRealNL}`);
+  } catch {}
 
   const now = Math.floor(Date.now() / 1000);
 
