@@ -9,11 +9,16 @@ import jwt from "jsonwebtoken";
  * - APPLE_PRIVATE_KEY   (contenu de la .p8, avec les retours à la ligne \n)
  */
 export function generateAppleJwt() {
-  const issuerId = process.env.APPLE_ISSUER_ID;
-  const iapKeyId = process.env.APPLE_IAP_KEY_ID;
-  let privateKey = process.env.APPLE_IAP_PRIVATE_KEY || process.env.APPLE_PRIVATE_KEY;
-  const keyId = iapKeyId || process.env.APPLE_KEY_ID;
-  const keySrc = iapKeyId || process.env.APPLE_IAP_PRIVATE_KEY ? "iap" : "asc";
+  const issuerId = (process.env.APPLE_ISSUER_ID || "").trim();
+  const iapKeyId = (process.env.APPLE_IAP_KEY_ID || "").trim();
+  const iapPrivate = process.env.APPLE_IAP_PRIVATE_KEY || "";
+  const ascKeyId = (process.env.APPLE_KEY_ID || "").trim();
+  const ascPrivate = process.env.APPLE_PRIVATE_KEY || "";
+  const useIap = Boolean(iapKeyId && iapPrivate);
+  const keyId = useIap ? iapKeyId : ascKeyId;
+  let privateKey = useIap ? iapPrivate : ascPrivate;
+  const bundleId = (process.env.APPLE_BUNDLE_ID || "").trim();
+  const keySrc = useIap ? "iap" : "asc";
 
   try {
     const orig = String(privateKey || "");
@@ -26,12 +31,12 @@ export function generateAppleJwt() {
 
   if (!issuerId || !keyId || !privateKey) {
     throw new Error(
-      "Missing Apple env vars. Need APPLE_ISSUER_ID and IAP/ASC key (KEY_ID + PRIVATE_KEY)"
+      "Missing Apple env vars. Need APPLE_ISSUER_ID and IAP or ASC key (KEY_ID + PRIVATE_KEY)"
     );
   }
 
   // Si la clé est stockée en env avec des \n, on reconvertit en vrais retours à la ligne
-  privateKey = privateKey.replace(/\\n/g, "\n");
+  privateKey = privateKey.replace(/\r/g, "").replace(/\\n/g, "\n");
 
   try {
     const post = String(privateKey || "");
@@ -44,10 +49,14 @@ export function generateAppleJwt() {
   // Apple recommande des JWT courts (ex: 5-20 min)
   const payload = {
     iss: issuerId,
-    iat: now,
-    exp: now + 60 * 10, // 10 minutes
+    iat: now - 10,
+    exp: now + 60 * 5, // 5 minutes
     aud: "appstoreconnect-v1",
   };
+
+  if (bundleId) {
+    payload.bid = bundleId;
+  }
 
   const token = jwt.sign(payload, privateKey, {
     algorithm: "ES256",

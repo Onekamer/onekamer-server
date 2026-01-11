@@ -64,7 +64,7 @@ async function verifyWithApple(transactionId) {
     const jwtHeader = base64UrlDecodeToJson(parts[0]);
     const jwtPayload = base64UrlDecodeToJson(parts[1]);
     const nowSec = Math.floor(Date.now() / 1000);
-    console.info(`[IAP][JWT] kid=${jwtHeader?.kid} iss=${jwtPayload?.iss} aud=${jwtPayload?.aud} expIn=${(jwtPayload?.exp ?? 0) - nowSec}s`);
+    console.info(`[IAP][JWT] kid=${jwtHeader?.kid} iss=${jwtPayload?.iss} aud=${jwtPayload?.aud} bid=${jwtPayload?.bid || ""} expIn=${(jwtPayload?.exp ?? 0) - nowSec}s`);
   } catch {}
 
   const envLog = (process.env.APPLE_ENV || "production").toLowerCase();
@@ -75,7 +75,7 @@ async function verifyWithApple(transactionId) {
 
   const res = await fetch(url, {
     method: "GET",
-    headers: { Authorization: `Bearer ${jwtToken}`, "Content-Type": "application/json" },
+    headers: { Authorization: `Bearer ${jwtToken}`, "Content-Type": "application/json", Accept: "application/json" },
   });
 
   const text = await res.text();
