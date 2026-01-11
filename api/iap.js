@@ -63,15 +63,11 @@ async function verifyWithApple(transactionId) {
     const parts = String(jwtToken).split(".");
     const jwtHeader = base64UrlDecodeToJson(parts[0]);
     const jwtPayload = base64UrlDecodeToJson(parts[1]);
-    const nowSec = Math.floor(Date.now() / 1000);
-    console.info(`[IAP][JWT] kid=${jwtHeader?.kid} iss=${jwtPayload?.iss} aud=${jwtPayload?.aud} bid=${jwtPayload?.bid || ""} expIn=${(jwtPayload?.exp ?? 0) - nowSec}s`);
   } catch {}
 
   const envLog = (process.env.APPLE_ENV || "production").toLowerCase();
   const base = appleBaseUrl();
   const url = `${base}/inApps/v1/transactions/${encodeURIComponent(transactionId)}`;
-
-  console.info(`[IAP][Apple] verify start env=${envLog} host=${base} tx=${transactionId}`);
 
   const res = await fetch(url, {
     method: "GET",
@@ -79,7 +75,6 @@ async function verifyWithApple(transactionId) {
   });
 
   const text = await res.text();
-  console.info(`[IAP][Apple] verify status=${res.status} host=${base}`);
 
   let json;
   try {
@@ -89,10 +84,6 @@ async function verifyWithApple(transactionId) {
   }
 
   if (!res.ok) {
-    const wwwAuth = res.headers.get("www-authenticate") || "";
-    const dateHdr = res.headers.get("date") || "";
-    console.error(`[IAP][Apple] verify hdr www-authenticate=${wwwAuth} date=${dateHdr}`);
-    console.error(`[IAP][Apple] verify error status=${res.status} host=${base} body=${text?.slice(0,2000) || ""}`);
     const msg =
       json?.errorMessage || json?.message || json?.error || `Apple API error (${res.status})`;
     const err = new Error(msg);

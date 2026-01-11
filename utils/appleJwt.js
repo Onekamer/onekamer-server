@@ -13,16 +13,7 @@ export function generateAppleJwt() {
   const keyId = (process.env.APPLE_IAP_KEY_ID || "").trim();
   let privateKey = process.env.APPLE_IAP_PRIVATE_KEY || "";
   const bundleId = (process.env.APPLE_BUNDLE_ID || "").trim();
-  const keySrc = "iap";
-
-  try {
-    const orig = String(privateKey || "");
-    const preHasEscNL = /\\n/.test(orig);
-    const preHasRealNL = orig.includes("\n");
-    const hasBegin = /BEGIN PRIVATE KEY/.test(orig);
-    const hasEnd = /END PRIVATE KEY/.test(orig);
-    console.info(`[IAP][PK] src=${keySrc} kid=${keyId} iss=${issuerId} preLen=${orig.length} begin=${hasBegin} end=${hasEnd} escNL=${preHasEscNL} realNL=${preHasRealNL}`);
-  } catch {}
+ 
 
   if (!issuerId || !keyId || !privateKey) {
     throw new Error(
@@ -33,11 +24,7 @@ export function generateAppleJwt() {
   // Si la clé est stockée en env avec des \n, on reconvertit en vrais retours à la ligne
   privateKey = privateKey.replace(/\r/g, "").replace(/\\n/g, "\n");
 
-  try {
-    const post = String(privateKey || "");
-    const postHasRealNL = post.includes("\n");
-    console.info(`[IAP][PK] postLen=${post.length} realNL=${postHasRealNL}`);
-  } catch {}
+ 
 
   const now = Math.floor(Date.now() / 1000);
 
