@@ -10,8 +10,10 @@ import jwt from "jsonwebtoken";
  */
 export function generateAppleJwt() {
   const issuerId = process.env.APPLE_ISSUER_ID;
-  const keyId = process.env.APPLE_KEY_ID;
-  let privateKey = process.env.APPLE_PRIVATE_KEY;
+  const iapKeyId = process.env.APPLE_IAP_KEY_ID;
+  let privateKey = process.env.APPLE_IAP_PRIVATE_KEY || process.env.APPLE_PRIVATE_KEY;
+  const keyId = iapKeyId || process.env.APPLE_KEY_ID;
+  const keySrc = iapKeyId || process.env.APPLE_IAP_PRIVATE_KEY ? "iap" : "asc";
 
   try {
     const orig = String(privateKey || "");
@@ -19,12 +21,12 @@ export function generateAppleJwt() {
     const preHasRealNL = orig.includes("\n");
     const hasBegin = /BEGIN PRIVATE KEY/.test(orig);
     const hasEnd = /END PRIVATE KEY/.test(orig);
-    console.info(`[IAP][PK] kid=${keyId} iss=${issuerId} preLen=${orig.length} begin=${hasBegin} end=${hasEnd} escNL=${preHasEscNL} realNL=${preHasRealNL}`);
+    console.info(`[IAP][PK] src=${keySrc} kid=${keyId} iss=${issuerId} preLen=${orig.length} begin=${hasBegin} end=${hasEnd} escNL=${preHasEscNL} realNL=${preHasRealNL}`);
   } catch {}
 
   if (!issuerId || !keyId || !privateKey) {
     throw new Error(
-      "Missing Apple env vars. Need APPLE_ISSUER_ID, APPLE_KEY_ID, APPLE_PRIVATE_KEY"
+      "Missing Apple env vars. Need APPLE_ISSUER_ID and IAP/ASC key (KEY_ID + PRIVATE_KEY)"
     );
   }
 
