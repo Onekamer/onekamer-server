@@ -10,15 +10,10 @@ import jwt from "jsonwebtoken";
  */
 export function generateAppleJwt() {
   const issuerId = (process.env.APPLE_ISSUER_ID || "").trim();
-  const iapKeyId = (process.env.APPLE_IAP_KEY_ID || "").trim();
-  const iapPrivate = process.env.APPLE_IAP_PRIVATE_KEY || "";
-  const ascKeyId = (process.env.APPLE_KEY_ID || "").trim();
-  const ascPrivate = process.env.APPLE_PRIVATE_KEY || "";
-  const useIap = Boolean(iapKeyId && iapPrivate);
-  const keyId = useIap ? iapKeyId : ascKeyId;
-  let privateKey = useIap ? iapPrivate : ascPrivate;
+  const keyId = (process.env.APPLE_IAP_KEY_ID || "").trim();
+  let privateKey = process.env.APPLE_IAP_PRIVATE_KEY || "";
   const bundleId = (process.env.APPLE_BUNDLE_ID || "").trim();
-  const keySrc = useIap ? "iap" : "asc";
+  const keySrc = "iap";
 
   try {
     const orig = String(privateKey || "");
@@ -31,7 +26,7 @@ export function generateAppleJwt() {
 
   if (!issuerId || !keyId || !privateKey) {
     throw new Error(
-      "Missing Apple env vars. Need APPLE_ISSUER_ID and IAP or ASC key (KEY_ID + PRIVATE_KEY)"
+      "Missing Apple env vars. Need APPLE_ISSUER_ID, APPLE_IAP_KEY_ID, APPLE_IAP_PRIVATE_KEY"
     );
   }
 
