@@ -373,4 +373,96 @@ router.post("/iap/verify", async (req, res) => {
   }
 });
 
+router.post("/iap/restore", async (req, res) => {
+  try {
+    const { platform, provider, userId, transactionIds, transactionId } = req.body || {};
+
+    if (!platform || !provider || !userId) {
+      return res.status(400).json({
+        ok: false,
+        error: "Missing required fields: platform, provider, userId",
+      });
+    }
+
+    const list = Array.isArray(transactionIds)
+      ? transactionIds
+      : (transactionId ? [transactionId] : []);
+
+    if (!list.length) {
+      return res.status(400).json({ ok: false, error: "Missing transactionIds or transactionId" });
+    }
+
+    const uniq = Array.from(new Set(list.map((x) => String(x))));
+    const results = [];
+
+    for (const tx of uniq) {
+      try {
+        let verified;
+        if (provider === "apple") {
+          verified = await verifyWithApple(tx);
+        } else if (provider === "google") {
+          verified = await verifyWithGoogle(tx);
+        } else {
+          return res.status(400).json({ ok: false, error: "Unsupported provider" });
+        }
+
+        const mapping = await loadProductMapping({
+          platform,
+          provider,
+          storeProductId: verified.storeProductId,
+        });
+
+        if (mapping.kind !== "subscription") {
+          results.push({
+            tx: verified.providerTxId,
+            productId: verified.storeProductId,
+            skipped: true,
+            reason: "not_restorable",
+          });
+          continue;
+        }
+
+        const existing = await findExistingTransaction(provider, verified.providerTxId);
+        if (!existing) {
+          await insertTransaction({
+            userId,
+            platform,
+            provider,
+            providerTxId: verified.providerTxId,
+            originalTxId: verified.originalTxId,
+            storeProductId: verified.storeProductId,
+            kind: mapping.kind,
+            purchasedAt: verified.purchasedAt,
+            expiresAt: verified.expiresAt,
+            raw: verified.raw,
+          });
+        }
+
+        const effect = await applyBusinessEffect({
+          userId,
+          mapping,
+          purchasedAt: verified.purchasedAt,
+          expiresAt: verified.expiresAt,
+        });
+
+        results.push({
+          tx: verified.providerTxId,
+          productId: verified.storeProductId,
+          effect,
+        });
+      } catch (e) {
+        results.push({ tx: String(tx), error: e?.message || "restore failed", details: e?.details || null });
+      }
+    }
+
+    return res.status(200).json({ ok: true, results });
+  } catch (e) {
+    return res.status(e?.status || 500).json({
+      ok: false,
+      error: e?.message || "Unknown error",
+      details: e?.details || null,
+    });
+  }
+});
+
 export default router;
