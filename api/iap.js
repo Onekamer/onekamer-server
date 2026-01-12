@@ -340,9 +340,18 @@ router.post("/iap/verify", async (req, res) => {
     // COMMUN: anti double-crédit
     const existing = await findExistingTransaction(provider, verified.providerTxId);
     if (existing) {
+      // Même si la transaction existe déjà, on applique l'effet business de façon idempotente
+      const effect = await applyBusinessEffect({
+        userId,
+        mapping,
+        purchasedAt: verified.purchasedAt,
+        expiresAt: verified.expiresAt,
+      });
+
       return res.status(200).json({
         ok: true,
         alreadyProcessed: true,
+        effect,
         transaction: {
           id: existing.id,
           provider: existing.provider,
@@ -370,10 +379,18 @@ router.post("/iap/verify", async (req, res) => {
 
     // Si null => collision UNIQUE, donc quelqu’un l’a déjà inséré entre temps
     if (!inserted) {
+      const effect = await applyBusinessEffect({
+        userId,
+        mapping,
+        purchasedAt: verified.purchasedAt,
+        expiresAt: verified.expiresAt,
+      });
+
       return res.status(200).json({
         ok: true,
         alreadyProcessed: true,
         note: "Transaction already inserted by another request (unique constraint).",
+        effect,
       });
     }
 
