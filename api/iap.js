@@ -203,21 +203,51 @@ async function applyBusinessEffect({ userId, mapping, purchasedAt, expiresAt }) 
     // IMPORTANT: profile_id doit correspondre à userId chez vous (sinon faudra mapper)
     const startDate = purchasedAt || new Date().toISOString();
 
-    const { error } = await supabase
+    // Remplacement de l'upsert (qui exige une contrainte UNIQUE sur profile_id) par un read-then-update/insert
+    const { data: existingRows, error: selErr } = await supabase
       .from("abonnements")
-      .upsert(
-        {
+      .select("id, start_date")
+      .eq("profile_id", userId)
+      .limit(1);
+
+    if (selErr) {
+      throw Object.assign(new Error("Supabase error: abonnements read"), { details: selErr });
+    }
+
+    const existing = Array.isArray(existingRows) && existingRows.length > 0 ? existingRows[0] : null;
+    const effectiveStart = existing?.start_date || startDate;
+
+    if (existing) {
+      const { error: updErr } = await supabase
+        .from("abonnements")
+        .update({
+          plan_name: mapping.plan_key,
+          status: "active",
+          start_date: effectiveStart,
+          end_date: expiresAt,
+          auto_renew: true,
+        })
+        .eq("id", existing.id);
+
+      if (updErr) {
+        throw Object.assign(new Error("Supabase error: abonnements update"), { details: updErr });
+      }
+    } else {
+      const { error: insErr } = await supabase
+        .from("abonnements")
+        .insert({
           profile_id: userId,
           plan_name: mapping.plan_key,
           status: "active",
           start_date: startDate,
           end_date: expiresAt,
           auto_renew: true,
-        },
-        { onConflict: "profile_id" }
-      );
+        });
 
-    if (error) throw Object.assign(new Error("Supabase error: abonnements upsert"), { details: error });
+      if (insErr) {
+        throw Object.assign(new Error("Supabase error: abonnements insert"), { details: insErr });
+      }
+    }
 
     return { kind: "subscription", plan_key: mapping.plan_key };
   }
