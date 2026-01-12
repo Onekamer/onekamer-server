@@ -465,4 +465,38 @@ router.post("/iap/restore", async (req, res) => {
   }
 });
 
+router.post("/iap/cancel", async (req, res) => {
+  try {
+    const { userId } = req.body || {};
+    if (!userId) {
+      return res.status(400).json({ ok: false, error: "Missing required field: userId" });
+    }
+
+    const nowIso = new Date().toISOString();
+
+    const { data, error } = await supabase
+      .from("abonnements")
+      .update({ status: "canceled", end_date: nowIso, auto_renew: false })
+      .eq("profile_id", userId)
+      .select("profile_id, plan_name, status, start_date, end_date, auto_renew")
+      .maybeSingle();
+
+    if (error) {
+      throw Object.assign(new Error("Supabase error: abonnements cancel"), { details: error });
+    }
+
+    if (!data) {
+      return res.status(404).json({ ok: false, error: "No subscription found for user" });
+    }
+
+    return res.status(200).json({ ok: true, subscription: data });
+  } catch (e) {
+    return res.status(e?.status || 500).json({
+      ok: false,
+      error: e?.message || "Unknown error",
+      details: e?.details || null,
+    });
+  }
+});
+
 export default router;
