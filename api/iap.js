@@ -261,6 +261,18 @@ async function applyBusinessEffect({ userId, mapping, purchasedAt, expiresAt }) 
       }
     }
 
+    if (nextStatus === "active") {
+      await supabase
+        .from("profiles")
+        .update({ plan: mapping.plan_key, updated_at: new Date().toISOString() })
+        .eq("id", userId);
+    } else {
+      await supabase
+        .from("profiles")
+        .update({ plan: "free", updated_at: new Date().toISOString() })
+        .eq("id", userId);
+    }
+
     return { kind: "subscription", plan_key: mapping.plan_key };
   }
 
@@ -560,6 +572,14 @@ router.post("/iap/cancel", async (req, res) => {
     if (error) {
       throw Object.assign(new Error("Supabase error: abonnements cancel"), { details: error });
     }
+
+    // Aligner le profil sur free pour l'UI
+    try {
+      await supabase
+        .from("profiles")
+        .update({ plan: "free", updated_at: new Date().toISOString() })
+        .eq("id", userId);
+    } catch {}
 
     return res.status(200).json({ ok: true, subscription: upd });
   } catch (e) {
