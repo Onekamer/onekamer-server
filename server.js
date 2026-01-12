@@ -726,7 +726,20 @@ async function requireVipOrAdminUser({ req }) {
   const plan = String(profile.plan || "free").toLowerCase();
   const isAdmin = Boolean(profile.is_admin) || String(profile.role || "").toLowerCase() === "admin";
   const isVip = plan === "vip";
-  if (!isAdmin && !isVip) return { ok: false, status: 403, error: "vip_required" };
+  if (!isAdmin) {
+    if (!isVip) return { ok: false, status: 403, error: "vip_required" };
+    const { data: sub, error: subErr } = await supabase
+      .from("abonnements")
+      .select("status, end_date, auto_renew")
+      .eq("profile_id", guard.userId)
+      .maybeSingle();
+    if (subErr) return { ok: false, status: 500, error: subErr.message || "subscription_read_failed" };
+    const endDate = sub?.end_date ? new Date(sub.end_date) : null;
+    const now = new Date();
+    if (!endDate || endDate <= now) {
+      return { ok: false, status: 403, error: "vip_required" };
+    }
+  }
 
   return { ok: true, userId: guard.userId, token: guard.token, profile };
 }
