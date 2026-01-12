@@ -206,7 +206,7 @@ async function applyBusinessEffect({ userId, mapping, purchasedAt, expiresAt }) 
     // Remplacement de l'upsert (qui exige une contrainte UNIQUE sur profile_id) par un read-then-update/insert
     const { data: existingRows, error: selErr } = await supabase
       .from("abonnements")
-      .select("id, start_date")
+      .select("id, start_date, end_date")
       .eq("profile_id", userId)
       .limit(1);
 
@@ -216,16 +216,28 @@ async function applyBusinessEffect({ userId, mapping, purchasedAt, expiresAt }) 
 
     const existing = Array.isArray(existingRows) && existingRows.length > 0 ? existingRows[0] : null;
     const effectiveStart = existing?.start_date || startDate;
+    const nowMs = Date.now();
+    const expMs = expiresAt ? new Date(expiresAt).getTime() : null;
+    // Ne jamais régresser la date de fin: on garde le max entre l'existant et le nouveau expiresAt
+    const effectiveEnd = (() => {
+      const prev = existing?.end_date || null;
+      if (!prev) return expiresAt || null;
+      if (!expiresAt) return prev;
+      return new Date(prev).getTime() >= new Date(expiresAt).getTime() ? prev : expiresAt;
+    })();
+    const isActive = effectiveEnd ? new Date(effectiveEnd).getTime() > nowMs : false;
+    const nextStatus = isActive ? "active" : "expired";
+    const nextAutoRenew = isActive ? true : false;
 
     if (existing) {
       const { error: updErr } = await supabase
         .from("abonnements")
         .update({
           plan_name: mapping.plan_key,
-          status: "active",
+          status: nextStatus,
           start_date: effectiveStart,
-          end_date: expiresAt,
-          auto_renew: true,
+          end_date: effectiveEnd,
+          auto_renew: nextAutoRenew,
         })
         .eq("id", existing.id);
 
@@ -238,10 +250,10 @@ async function applyBusinessEffect({ userId, mapping, purchasedAt, expiresAt }) 
         .insert({
           profile_id: userId,
           plan_name: mapping.plan_key,
-          status: "active",
+          status: expMs && expMs > nowMs ? "active" : "expired",
           start_date: startDate,
           end_date: expiresAt,
-          auto_renew: true,
+          auto_renew: expMs && expMs > nowMs ? true : false,
         });
 
       if (insErr) {
@@ -521,15 +533,61 @@ router.post("/iap/cancel", async (req, res) => {
 
     const nowIso = new Date().toISOString();
 
-    const { data, error } = await supabase
+    // Sélectionne l'abonnement le plus pertinent (par exemple le plus récent via end_date)
+    const { data: sub, error: selErr } = await supabase
+      .from("abonnements")
+      .select("id, profile_id, plan_name, status, start_date, end_date, auto_renew")
+      .eq("profile_id", userId)
+      .order("end_date", { ascending: false })
+      .limit(1)
+      .maybeSingle();
+
+    if (selErr) {
+      throw Object.assign(new Error("Supabase error: abonnements read for cancel"), { details: selErr });
+    }
+
+    if (!sub) {
+      return res.status(404).json({ ok: false, error: "No subscription found for user" });
+    }
+
+    const { data: upd, error } = await supabase
       .from("abonnements")
       .update({ status: "canceled", end_date: nowIso, auto_renew: false })
-      .eq("profile_id", userId)
+      .eq("id", sub.id)
       .select("profile_id, plan_name, status, start_date, end_date, auto_renew")
-      .maybeSingle();
+      .single();
 
     if (error) {
       throw Object.assign(new Error("Supabase error: abonnements cancel"), { details: error });
+    }
+
+    return res.status(200).json({ ok: true, subscription: upd });
+  } catch (e) {
+    return res.status(e?.status || 500).json({
+      ok: false,
+      error: e?.message || "Unknown error",
+      details: e?.details || null,
+    });
+  }
+});
+
+router.get("/iap/subscription", async (req, res) => {
+  try {
+    const userId = String(req.query.userId || "").trim();
+    if (!userId) {
+      return res.status(400).json({ ok: false, error: "Missing required field: userId" });
+    }
+
+    const { data, error } = await supabase
+      .from("abonnements")
+      .select("profile_id, plan_name, status, start_date, end_date, auto_renew")
+      .eq("profile_id", userId)
+      .order("end_date", { ascending: false })
+      .limit(1)
+      .maybeSingle();
+
+    if (error) {
+      throw Object.assign(new Error("Supabase error: abonnements read"), { details: error });
     }
 
     if (!data) {
