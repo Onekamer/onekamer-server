@@ -552,7 +552,7 @@ router.post("/iap/cancel", async (req, res) => {
 
     const { data: upd, error } = await supabase
       .from("abonnements")
-      .update({ status: "canceled", end_date: nowIso, auto_renew: false })
+      .update({ status: "expired", end_date: nowIso, auto_renew: false })
       .eq("id", sub.id)
       .select("profile_id, plan_name, status, start_date, end_date, auto_renew")
       .single();
