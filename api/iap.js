@@ -624,4 +624,153 @@ router.get("/iap/subscription", async (req, res) => {
   }
 });
 
+router.post("/iap/sync-subscription", async (req, res) => {
+  try {
+    const { userId } = req.body || {};
+    if (!userId) {
+      return res.status(400).json({ ok: false, error: "Missing required field: userId" });
+    }
+
+    const { data: tx, error: txErr } = await supabase
+      .from("iap_transactions")
+      .select("original_transaction_id, transaction_id")
+      .eq("user_id", userId)
+      .eq("provider", "apple")
+      .eq("product_type", "subscription")
+      .order("purchased_at", { ascending: false })
+      .limit(1)
+      .maybeSingle();
+
+    if (txErr) {
+      return res.status(500).json({ ok: false, error: txErr.message || "transactions_read_failed" });
+    }
+    if (!tx) {
+      return res.status(404).json({ ok: false, error: "No original transaction found" });
+    }
+
+    let originalId = tx?.original_transaction_id || null;
+    if (!originalId && tx?.transaction_id) {
+      try {
+        const verified = await verifyWithApple(tx.transaction_id);
+        originalId = verified?.originalTxId || null;
+      } catch {}
+    }
+    if (!originalId) {
+      return res.status(404).json({ ok: false, error: "No original transaction id" });
+    }
+
+    const base = appleBaseUrl();
+    const url = `${base}/inApps/v1/subscriptions/${encodeURIComponent(originalId)}`;
+    const jwtToken = generateAppleJwt();
+    const r = await fetch(url, {
+      method: "GET",
+      headers: { Authorization: `Bearer ${jwtToken}`, Accept: "application/json" },
+    });
+    const t = await r.text();
+    let j;
+    try {
+      j = t ? JSON.parse(t) : {};
+    } catch {
+      j = { raw: t };
+    }
+    if (!r.ok) {
+      const msg = j?.errorMessage || j?.message || j?.error || `Apple API error (${r.status})`;
+      return res.status(r.status).json({ ok: false, error: msg, details: j });
+    }
+
+    const items = Array.isArray(j?.data) ? j.data : [];
+    const lastTxs = [];
+    for (const it of items) {
+      const arr = Array.isArray(it?.lastTransactions) ? it.lastTransactions : [];
+      for (const x of arr) lastTxs.push(x);
+    }
+    if (!lastTxs.length) {
+      return res.status(404).json({ ok: false, error: "No lastTransactions" });
+    }
+
+    let best = null;
+    for (const x of lastTxs) {
+      try {
+        const txInfo = decodeJwsPayload(x.signedTransactionInfo);
+        const rnInfo = x?.signedRenewalInfo ? decodeJwsPayload(x.signedRenewalInfo) : null;
+        const productId = txInfo?.productId;
+        if (!productId) continue;
+        let mapping;
+        try {
+          mapping = await loadProductMapping({ platform: "ios", provider: "apple", storeProductId: productId });
+        } catch {
+          continue;
+        }
+        if (mapping?.kind !== "subscription" || String(mapping?.plan_key) !== "vip") continue;
+        const expiresIso = toIsoOrNull(txInfo?.expiresDate);
+        const ar = rnInfo?.autoRenewStatus;
+        const autoRenew = ar === 1 || ar === "1";
+        if (!expiresIso) continue;
+        const cand = {
+          mapping,
+          productId,
+          expiresIso,
+          autoRenew,
+        };
+        if (!best || new Date(cand.expiresIso).getTime() > new Date(best.expiresIso).getTime()) best = cand;
+      } catch {}
+    }
+
+    if (!best) {
+      return res.status(404).json({ ok: false, error: "No mappable subscription" });
+    }
+
+    const now = Date.now();
+    const active = new Date(best.expiresIso).getTime() > now;
+    const nextStatus = active ? "active" : "expired";
+    const nextPlan = active ? best.mapping.plan_key : "free";
+
+    const { data: sub, error: subSelErr } = await supabase
+      .from("abonnements")
+      .select("id, start_date")
+      .eq("profile_id", userId)
+      .order("end_date", { ascending: false })
+      .limit(1)
+      .maybeSingle();
+    if (subSelErr) {
+      return res.status(500).json({ ok: false, error: subSelErr.message || "subscription_read_failed" });
+    }
+
+    if (sub) {
+      const { data: up, error: updErr } = await supabase
+        .from("abonnements")
+        .update({ plan_name: best.mapping.plan_key, status: nextStatus, end_date: best.expiresIso, auto_renew: best.autoRenew })
+        .eq("id", sub.id)
+        .select("profile_id, plan_name, status, start_date, end_date, auto_renew")
+        .single();
+      if (updErr) {
+        return res.status(500).json({ ok: false, error: updErr.message || "subscription_update_failed" });
+      }
+      try {
+        await supabase.from("profiles").update({ plan: nextPlan, updated_at: new Date().toISOString() }).eq("id", userId);
+      } catch {}
+      return res.status(200).json({ ok: true, subscription: up });
+    } else {
+      const { data: ins, error: insErr } = await supabase
+        .from("abonnements")
+        .insert({ profile_id: userId, plan_name: best.mapping.plan_key, status: nextStatus, start_date: new Date().toISOString(), end_date: best.expiresIso, auto_renew: best.autoRenew })
+        .select("profile_id, plan_name, status, start_date, end_date, auto_renew")
+        .single();
+      if (insErr) {
+        return res.status(500).json({ ok: false, error: insErr.message || "subscription_insert_failed" });
+      }
+      try {
+        await supabase.from("profiles").update({ plan: nextPlan, updated_at: new Date().toISOString() }).eq("id", userId);
+      } catch {}
+      return res.status(200).json({ ok: true, subscription: ins });
+    }
+  } catch (e) {
+    return res.status(e?.status || 500).json({
+      ok: false,
+      error: e?.message || "Unknown error",
+      details: e?.details || null,
+    });
+  }
+});
+
 export default router;

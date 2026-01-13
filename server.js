@@ -732,6 +732,8 @@ async function requireVipOrAdminUser({ req }) {
       .from("abonnements")
       .select("status, end_date, auto_renew")
       .eq("profile_id", guard.userId)
+      .order("end_date", { ascending: false })
+      .limit(1)
       .maybeSingle();
     if (subErr) return { ok: false, status: 500, error: subErr.message || "subscription_read_failed" };
     const endDate = sub?.end_date ? new Date(sub.end_date) : null;
