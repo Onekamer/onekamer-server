@@ -76,6 +76,13 @@ app.use(express.urlencoded({ extended: true }));
 // 3) Health check
 app.get("/health", (_req, res) => res.status(200).send("ok"));
 
+// Stripe publishable key
+app.get("/api/stripe/config", (_req, res) => {
+  const pk = process.env.STRIPE_PUBLISHABLE_KEY;
+  if (!pk) return res.status(500).json({ error: "publishable_key_missing" });
+  return res.json({ publishableKey: pk });
+});
+
 app.use("/api", uploadRoute);
 app.use("/api", partenaireDefaultsRoute);
 app.use("/api", fixAnnoncesImagesRoute);
@@ -123,6 +130,152 @@ app.get("/api/market/fx-rate", async (req, res) => {
     return res.json({ from, to, rate });
   } catch (e) {
     return res.status(500).json({ error: e?.message || "fx_error" });
+  }
+});
+
+app.post("/api/events/:eventId/intent", async (req, res) => {
+  const { eventId } = req.params;
+
+  try {
+    const authHeader = req.headers["authorization"] || "";
+    const token = authHeader.startsWith("Bearer ") ? authHeader.slice(7) : null;
+    if (!token) return res.status(401).json({ error: "unauthorized" });
+
+    const supabaseAuth = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_ANON_KEY);
+    const { data: userData, error: userErr } = await supabaseAuth.auth.getUser(token);
+    if (userErr || !userData?.user) return res.status(401).json({ error: "invalid_token" });
+
+    const userId = userData.user.id;
+    const { payment_mode } = req.body || {};
+    const paymentMode = payment_mode === "deposit" ? "deposit" : "full";
+
+    if (!eventId) return res.status(400).json({ error: "eventId requis" });
+
+    const { data: ev, error: evErr } = await supabase
+      .from("evenements")
+      .select("id, title, price_amount, currency, deposit_percent")
+      .eq("id", eventId)
+      .maybeSingle();
+    if (evErr) throw new Error(evErr.message);
+    if (!ev) return res.status(404).json({ error: "event_not_found" });
+
+    const amountTotal = typeof ev.price_amount === "number" ? ev.price_amount : 0;
+    const currency = ev.currency ? String(ev.currency).toLowerCase() : null;
+    const depositPercent = typeof ev.deposit_percent === "number" ? ev.deposit_percent : null;
+
+    if (!currency || !["eur", "usd", "cad", "xaf"].includes(currency)) {
+      return res.status(400).json({ error: "currency_invalid" });
+    }
+    if (!amountTotal || amountTotal <= 0) {
+      return res.status(400).json({ error: "event_not_payable" });
+    }
+
+    const { data: pay, error: payErr } = await supabase
+      .from("event_payments")
+      .select("amount_total, amount_paid, status")
+      .eq("event_id", eventId)
+      .eq("user_id", userId)
+      .maybeSingle();
+    if (payErr) throw new Error(payErr.message);
+
+    const alreadyPaid = typeof pay?.amount_paid === "number" ? pay.amount_paid : 0;
+    const remaining = Math.max(amountTotal - alreadyPaid, 0);
+    if (remaining <= 0) {
+      return res.status(200).json({ alreadyPaid: true, message: "Déjà payé" });
+    }
+
+    let amountToPay = remaining;
+    if (paymentMode === "deposit") {
+      if (!depositPercent || depositPercent <= 0) {
+        return res.status(400).json({ error: "deposit_not_enabled" });
+      }
+      const depositAmount = Math.max(1, Math.round((amountTotal * depositPercent) / 100));
+      amountToPay = Math.min(depositAmount, remaining);
+    }
+
+    const { error: upErr } = await supabase
+      .from("event_payments")
+      .upsert(
+        {
+          event_id: eventId,
+          user_id: userId,
+          status: pay?.status || "unpaid",
+          amount_total: amountTotal,
+          amount_paid: alreadyPaid,
+          currency,
+          updated_at: new Date().toISOString(),
+        },
+        { onConflict: "event_id,user_id" }
+      );
+    if (upErr) throw new Error(upErr.message);
+
+    const pi = await stripe.paymentIntents.create({
+      amount: amountToPay,
+      currency,
+      automatic_payment_methods: { enabled: true },
+      metadata: { type: "event_payment", eventId: String(eventId), userId, paymentMode },
+    });
+
+    await logEvent({
+      category: "event_payment",
+      action: "pi.create",
+      status: "success",
+      userId,
+      context: { eventId, paymentMode, amountToPay, amountTotal, currency, payment_intent_id: pi.id },
+    });
+
+    return res.json({ clientSecret: pi.client_secret });
+  } catch (e) {
+    console.error("❌ POST /api/events/:eventId/intent:", e);
+    await logEvent({
+      category: "event_payment",
+      action: "pi.create",
+      status: "error",
+      userId: null,
+      context: { eventId: req.params?.eventId || null, error: e?.message || String(e) },
+    });
+    return res.status(500).json({ error: e?.message || "Erreur interne" });
+  }
+});
+
+app.post("/api/okcoins/intent", bodyParser.json(), async (req, res) => {
+  try {
+    const guard = await requireUserJWT(req);
+    if (!guard.ok) return res.status(guard.status).json({ error: guard.error });
+
+    const { packId } = req.body || {};
+    if (!packId) return res.status(400).json({ error: "packId requis" });
+
+    const { data: pack, error: packErr } = await supabase
+      .from("okcoins_packs")
+      .select("pack_name, price_eur, is_active")
+      .eq("id", packId)
+      .maybeSingle();
+    if (packErr) return res.status(500).json({ error: packErr.message || "Erreur pack" });
+    if (!pack || pack.is_active !== true) return res.status(404).json({ error: "pack_inactive" });
+
+    const amount = Math.round(Number(pack.price_eur || 0) * 100);
+    if (!Number.isFinite(amount) || amount <= 0) return res.status(400).json({ error: "amount_invalid" });
+
+    const pi = await stripe.paymentIntents.create({
+      amount,
+      currency: "eur",
+      automatic_payment_methods: { enabled: true },
+      metadata: { type: "okcoins_pack", packId: String(packId), userId: guard.userId },
+    });
+
+    await logEvent({
+      category: "okcoins",
+      action: "pi.create",
+      status: "success",
+      userId: guard.userId,
+      context: { packId, payment_intent_id: pi.id },
+    });
+
+    return res.json({ clientSecret: pi.client_secret });
+  } catch (e) {
+    await logEvent({ category: "okcoins", action: "pi.create", status: "error", userId: null, context: { error: e?.message || String(e) } });
+    return res.status(500).json({ error: e?.message || "Erreur interne" });
   }
 });
 
@@ -2346,6 +2499,122 @@ async function stripeWebhookHandler(req, res) {
   });
 
   try {
+    if (event.type === "payment_intent.succeeded") {
+      const pi = event.data.object;
+      const md = pi?.metadata || {};
+      const type = String(md.type || "");
+
+      // OK COINS via PaymentIntent
+      if (type === "okcoins_pack") {
+        const userId = md.userId || md.user_id || null;
+        const packId = md.packId || md.pack_id || null;
+        if (userId && packId) {
+          try {
+            const { error } = await supabase.rpc("okc_grant_pack_after_payment", {
+              p_user: userId,
+              p_pack_id: parseInt(packId, 10),
+              p_status: "paid",
+            });
+            if (error) {
+              await logEvent({ category: "okcoins", action: "pi.succeeded.credit", status: "error", userId, context: { packId, rpc_error: error.message, payment_intent_id: pi.id } });
+            } else {
+              await logEvent({ category: "okcoins", action: "pi.succeeded.credit", status: "success", userId, context: { packId, payment_intent_id: pi.id } });
+            }
+          } catch (e) {
+            await logEvent({ category: "okcoins", action: "pi.succeeded.credit", status: "error", userId, context: { packId, error: e?.message || String(e), payment_intent_id: pi.id } });
+          }
+        }
+        return res.json({ received: true });
+      }
+
+      // Paiement Évènement via PaymentIntent
+      if (type === "event_payment") {
+        const userId = md.userId || null;
+        const eventId = md.eventId || null;
+        const amountPaidNow = typeof pi?.amount === "number" ? pi.amount : 0;
+        if (userId && eventId && amountPaidNow > 0) {
+          try {
+            const { data: ev, error: evErr } = await supabase
+              .from("evenements")
+              .select("id, price_amount, currency")
+              .eq("id", eventId)
+              .maybeSingle();
+            if (evErr) throw new Error(evErr.message);
+
+            const amountTotal = typeof ev?.price_amount === "number" ? ev.price_amount : 0;
+            if (!amountTotal || amountTotal <= 0) {
+              await logEvent({ category: "event_payment", action: "pi.succeeded.skipped", status: "info", userId, context: { eventId, reason: "event_not_payable", payment_intent_id: pi.id } });
+              return res.json({ received: true });
+            }
+
+            const { data: existingPay, error: getPayErr } = await supabase
+              .from("event_payments")
+              .select("id, amount_total, amount_paid")
+              .eq("event_id", eventId)
+              .eq("user_id", userId)
+              .maybeSingle();
+            if (getPayErr) throw new Error(getPayErr.message);
+
+            const prevPaid = typeof existingPay?.amount_paid === "number" ? existingPay.amount_paid : 0;
+            const newPaid = Math.min(prevPaid + amountPaidNow, amountTotal);
+            const newStatus = newPaid >= amountTotal ? "paid" : newPaid > 0 ? "deposit_paid" : "unpaid";
+
+            const upsertPayload = {
+              event_id: eventId,
+              user_id: userId,
+              amount_total: amountTotal,
+              amount_paid: newPaid,
+              currency: ev?.currency ? String(ev.currency).toLowerCase() : null,
+              status: newStatus,
+              stripe_payment_intent_id: pi.id,
+              updated_at: new Date().toISOString(),
+            };
+
+            const { error: upsertErr } = await supabase
+              .from("event_payments")
+              .upsert(upsertPayload, { onConflict: "event_id,user_id" });
+            if (upsertErr) throw new Error(upsertErr.message);
+
+            const { data: existingQr, error: qrErr } = await supabase
+              .from("event_qrcodes")
+              .select("id")
+              .eq("event_id", eventId)
+              .eq("user_id", userId)
+              .eq("status", "active")
+              .maybeSingle();
+            if (qrErr) throw new Error(qrErr.message);
+
+            if (!existingQr) {
+              const qrcode_value = crypto.randomUUID();
+              const { error: insQrErr } = await supabase
+                .from("event_qrcodes")
+                .insert([{ user_id: userId, event_id: eventId, qrcode_value }]);
+              if (insQrErr) throw new Error(insQrErr.message);
+            }
+
+            await logEvent({
+              category: "event_payment",
+              action: "pi.succeeded",
+              status: "success",
+              userId,
+              context: { eventId, amountPaidNow, amountPaid: newPaid, amountTotal, paymentStatus: newStatus, payment_intent_id: pi.id },
+            });
+          } catch (e) {
+            await logEvent({
+              category: "event_payment",
+              action: "pi.succeeded",
+              status: "error",
+              userId: md.userId || null,
+              context: { eventId: md.eventId || null, error: e?.message || String(e), payment_intent_id: pi.id },
+            });
+          }
+        }
+        return res.json({ received: true });
+      }
+
+      // Autres types PI: on ignore
+      return res.json({ received: true });
+    }
     if (event.type === "account.updated" || event.type === "v2.core.account.updated") {
       const account = event.data.object;
       const accountId = account?.id ? String(account.id) : null;
