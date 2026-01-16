@@ -2002,6 +2002,102 @@ app.post("/api/market/orders/:orderId/checkout", bodyParser.json(), async (req, 
   }
 });
 
+app.post("/api/market/orders/:orderId/intent", bodyParser.json(), async (req, res) => {
+  try {
+    const guard = await requireUserJWT(req);
+    if (!guard.ok) return res.status(guard.status).json({ error: guard.error });
+
+    const { orderId } = req.params;
+    if (!orderId) return res.status(400).json({ error: "orderId requis" });
+
+    const { data: order, error: oErr } = await supabase
+      .from("partner_orders")
+      .select("id, partner_id, customer_user_id, status, charge_currency, charge_amount_total, platform_fee_amount")
+      .eq("id", orderId)
+      .maybeSingle();
+    if (oErr) return res.status(500).json({ error: oErr.message || "Erreur lecture commande" });
+    if (!order) return res.status(404).json({ error: "order_not_found" });
+    if (order.customer_user_id !== guard.userId) return res.status(403).json({ error: "forbidden" });
+    if (!["created", "payment_pending"].includes(String(order.status || ""))) {
+      return res.status(400).json({ error: "order_status_invalid" });
+    }
+
+    const { data: partner, error: pErr } = await supabase
+      .from("partners_market")
+      .select("id, status, payout_status, is_open, stripe_connect_account_id")
+      .eq("id", order.partner_id)
+      .maybeSingle();
+    if (pErr) return res.status(500).json({ error: pErr.message || "Erreur lecture partenaire" });
+    if (!partner) return res.status(404).json({ error: "partner_not_found" });
+
+    const isApproved = String(partner.status || "").toLowerCase() === "approved";
+    const payoutComplete = String(partner.payout_status || "").toLowerCase() === "complete";
+    const isOpen = partner.is_open === true;
+    if (!(isApproved && payoutComplete && isOpen)) {
+      return res.status(400).json({ error: "partner_not_commandable" });
+    }
+
+    const currency = String(order.charge_currency || "").toLowerCase();
+    const unitAmount = Number(order.charge_amount_total);
+    if (!currency || !Number.isFinite(unitAmount) || unitAmount <= 0) {
+      return res.status(400).json({ error: "order_amount_invalid" });
+    }
+
+    const destinationAccount = partner?.stripe_connect_account_id ? String(partner.stripe_connect_account_id) : null;
+    if (!destinationAccount) {
+      return res.status(400).json({ error: "partner_connect_account_missing" });
+    }
+
+    const applicationFeeAmount = Number(order.platform_fee_amount);
+    if (!Number.isFinite(applicationFeeAmount) || applicationFeeAmount < 0) {
+      return res.status(400).json({ error: "order_fee_invalid" });
+    }
+    if (applicationFeeAmount > unitAmount) {
+      return res.status(400).json({ error: "order_fee_too_high" });
+    }
+
+    const pi = await stripe.paymentIntents.create({
+      amount: unitAmount,
+      currency,
+      application_fee_amount: applicationFeeAmount,
+      transfer_data: { destination: destinationAccount },
+      automatic_payment_methods: { enabled: true },
+      metadata: {
+        type: "market_order",
+        market_order_id: orderId,
+        partner_id: order.partner_id,
+        customer_user_id: guard.userId,
+      },
+    });
+
+    const { data: existingPay, error: readPayErr } = await supabase
+      .from("partner_order_payments")
+      .select("id, status")
+      .eq("order_id", orderId)
+      .maybeSingle();
+    if (readPayErr) return res.status(500).json({ error: readPayErr.message || "Erreur lecture paiement" });
+    if (existingPay?.id) {
+      const { error: upErr } = await supabase
+        .from("partner_order_payments")
+        .update({ status: "created" })
+        .eq("id", existingPay.id);
+      if (upErr) return res.status(500).json({ error: upErr.message || "Erreur mise à jour paiement" });
+    } else {
+      const { error: insErr } = await supabase
+        .from("partner_order_payments")
+        .insert({ order_id: orderId, status: "created" });
+      if (insErr) return res.status(500).json({ error: insErr.message || "Erreur création paiement" });
+    }
+
+    await supabase.from("partner_orders").update({ status: "payment_pending" }).eq("id", orderId);
+
+    const partnerAmount = Math.max(unitAmount - applicationFeeAmount, 0);
+    return res.json({ clientSecret: pi.client_secret, order: { amount: unitAmount, currency, platform_fee: applicationFeeAmount, partner_amount: partnerAmount } });
+  } catch (e) {
+    return res.status(500).json({ error: e?.message || "Erreur interne" });
+  }
+});
+
 // ============================================================
 // 📧 Email - Brevo HTTP API (PROD) + fallback Nodemailer
 // ============================================================
@@ -2607,6 +2703,51 @@ async function stripeWebhookHandler(req, res) {
               userId: md.userId || null,
               context: { eventId: md.eventId || null, error: e?.message || String(e), payment_intent_id: pi.id },
             });
+          }
+        }
+        return res.json({ received: true });
+      }
+
+      if (type === "market_order") {
+        const orderId = md.market_order_id || null;
+        const customerUserId = md.customer_user_id || null;
+        try {
+          const { error: evtErr } = await supabase
+            .from("stripe_events")
+            .insert({ event_id: event.id });
+          if (evtErr && evtErr.code === "23505") {
+            await logEvent({ category: "marketplace", action: "pi.succeeded.duplicate", status: "info", userId: customerUserId, context: { orderId, payment_intent_id: pi.id, event_id: event.id } });
+            return res.json({ received: true });
+          }
+        } catch {}
+
+        if (orderId) {
+          try {
+            await supabase.from("partner_orders").update({ status: "paid" }).eq("id", orderId);
+
+            const { data: payRow, error: readErr } = await supabase
+              .from("partner_order_payments")
+              .select("id")
+              .eq("order_id", orderId)
+              .maybeSingle();
+            if (readErr) throw new Error(readErr.message);
+
+            if (payRow?.id) {
+              const { error: upErr } = await supabase
+                .from("partner_order_payments")
+                .update({ status: "succeeded" })
+                .eq("id", payRow.id);
+              if (upErr) throw new Error(upErr.message);
+            } else {
+              const { error: insErr } = await supabase
+                .from("partner_order_payments")
+                .insert({ order_id: orderId, status: "succeeded" });
+              if (insErr) throw new Error(insErr.message);
+            }
+
+            await logEvent({ category: "marketplace", action: "pi.succeeded", status: "success", userId: customerUserId, context: { orderId, payment_intent_id: pi.id } });
+          } catch (e) {
+            await logEvent({ category: "marketplace", action: "pi.succeeded", status: "error", userId: customerUserId, context: { orderId, error: e?.message || String(e), payment_intent_id: pi.id } });
           }
         }
         return res.json({ received: true });
