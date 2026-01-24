@@ -279,6 +279,180 @@ app.post("/api/okcoins/intent", bodyParser.json(), async (req, res) => {
   }
 });
 
+// ============================================================
+// 6️⃣ OK COINS — Ledger & Withdrawals API (PROD)
+// ============================================================
+
+async function getUserOkcBalanceSnapshot(userId) {
+  const safeId = String(userId || "").trim();
+  if (!safeId) return { coins_balance: 0, points_total: 0, pending: 0, available: 0 };
+
+  const { data: bal } = await supabase
+    .from("okcoins_users_balance")
+    .select("coins_balance, points_total")
+    .eq("user_id", safeId)
+    .maybeSingle();
+
+  const coins_balance = Number(bal?.coins_balance || 0);
+  const points_total = Number(bal?.points_total || 0);
+
+  const { data: wdRows } = await supabase
+    .from("okcoins_withdrawals")
+    .select("amount, status")
+    .eq("user_id", safeId)
+    .in("status", ["requested", "processing"]);
+
+  const pending = Array.isArray(wdRows) ? wdRows.reduce((acc, r) => acc + Number(r?.amount || 0), 0) : 0;
+  const available = Math.max(0, coins_balance - pending);
+  return { coins_balance, points_total, pending, available };
+}
+
+// Solde disponible utilisateur
+app.get("/api/okcoins/balance", async (req, res) => {
+  try {
+    const guard = await requireUserJWT(req);
+    if (!guard.ok) return res.status(guard.status).json({ error: guard.error });
+
+    const snap = await getUserOkcBalanceSnapshot(guard.userId);
+    return res.json(snap);
+  } catch (e) {
+    return res.status(500).json({ error: e?.message || "Erreur interne" });
+  }
+});
+
+// Ledger utilisateur (paginé)
+app.get("/api/okcoins/ledger", async (req, res) => {
+  try {
+    const guard = await requireUserJWT(req);
+    if (!guard.ok) return res.status(guard.status).json({ error: guard.error });
+
+    const limitRaw = req.query.limit;
+    const offsetRaw = req.query.offset;
+    const limit = Math.min(Math.max(parseInt(limitRaw, 10) || 20, 1), 100);
+    const offset = Math.max(parseInt(offsetRaw, 10) || 0, 0);
+
+    const { data: items, error, count } = await supabase
+      .from("okcoins_ledger")
+      .select("id, created_at, delta, kind, ref_type, ref_id, balance_after, metadata", { count: "exact" })
+      .eq("user_id", guard.userId)
+      .order("created_at", { ascending: false })
+      .range(offset, offset + limit - 1);
+    if (error) return res.status(500).json({ error: error.message || "Erreur lecture ledger" });
+
+    const enriched = (items || []).map((it) => {
+      const md = it && typeof it.metadata === "object" && it.metadata !== null ? it.metadata : {};
+      const anonymous = Boolean(md.anonymous);
+      let direction = it.delta >= 0 ? "in" : "out";
+      let other_username = null;
+
+      if (String(it.kind) === "donation_in") {
+        other_username = anonymous ? "un membre" : (md.sender_username || md.from_username || null);
+      } else if (String(it.kind) === "donation_out") {
+        other_username = md.receiver_username || md.to_username || null;
+      }
+
+      return { ...it, direction, other_username, anonymous };
+    });
+
+    return res.json({ items: enriched, total: typeof count === "number" ? count : null, limit, offset });
+  } catch (e) {
+    return res.status(500).json({ error: e?.message || "Erreur interne" });
+  }
+});
+
+// Mes retraits (paginé)
+app.get("/api/okcoins/withdrawals", async (req, res) => {
+  try {
+    const guard = await requireUserJWT(req);
+    if (!guard.ok) return res.status(guard.status).json({ error: guard.error });
+
+    const limitRaw = req.query.limit;
+    const offsetRaw = req.query.offset;
+    const limit = Math.min(Math.max(parseInt(limitRaw, 10) || 20, 1), 100);
+    const offset = Math.max(parseInt(offsetRaw, 10) || 0, 0);
+
+    const { data: items, error, count } = await supabase
+      .from("okcoins_withdrawals")
+      .select("id, created_at, updated_at, amount, status, balance_at_request, processed_at, refused_at, refused_reason, admin_notes", { count: "exact" })
+      .eq("user_id", guard.userId)
+      .order("created_at", { ascending: false })
+      .range(offset, offset + limit - 1);
+    if (error) return res.status(500).json({ error: error.message || "Erreur lecture retraits" });
+
+    return res.json({ items: items || [], total: typeof count === "number" ? count : null, limit, offset });
+  } catch (e) {
+    return res.status(500).json({ error: e?.message || "Erreur interne" });
+  }
+});
+
+// Créer une demande de retrait (utilisateur)
+app.post("/api/okcoins/withdrawals/request", bodyParser.json(), async (req, res) => {
+  try {
+    const guard = await requireUserJWT(req);
+    if (!guard.ok) return res.status(guard.status).json({ error: guard.error });
+
+    const rawAmount = req.body?.amount;
+    const amount = Math.floor(Number(rawAmount));
+    if (!Number.isFinite(amount) || amount <= 0 || amount < 1000) {
+      return res.status(400).json({ error: "amount_invalid" });
+    }
+
+    const snap = await getUserOkcBalanceSnapshot(guard.userId);
+    if (amount > snap.available) {
+      return res.status(400).json({ error: "insufficient_available_balance" });
+    }
+
+    const nowIso = new Date().toISOString();
+    const payload = {
+      user_id: guard.userId,
+      amount,
+      status: "requested",
+      balance_at_request: snap.coins_balance,
+      updated_at: nowIso,
+    };
+
+    const { data: inserted, error: insErr } = await supabase
+      .from("okcoins_withdrawals")
+      .insert(payload)
+      .select("id")
+      .maybeSingle();
+    if (insErr) return res.status(500).json({ error: insErr.message || "Erreur création retrait" });
+
+    // Email + Push admin
+    try {
+      const { data: prof } = await supabase
+        .from("profiles")
+        .select("username, email")
+        .eq("id", guard.userId)
+        .maybeSingle();
+
+      const username = prof?.username || "membre";
+      const email = prof?.email || "";
+      const withdrawalEmail = process.env.WITHDRAWAL_ALERT_EMAIL || "contact@onekamer.co";
+      const text = [
+        "Nouvelle demande de retrait OK COINS",
+        "",
+        `Utilisateur : ${username}`,
+        `Email : ${email}`,
+        `ID utilisateur : ${guard.userId}`,
+        `Montant demandé : ${amount.toLocaleString("fr-FR")} pièces`,
+        `Date : ${new Date().toLocaleString("fr-FR")}`,
+        "",
+        "— Notification automatique OneKamer.co",
+      ].join("\n");
+
+      await sendEmailViaBrevo({ to: withdrawalEmail, subject: "Nouvelle demande de retrait OK COINS", text });
+      await sendAdminWithdrawalPush(req, { username, amount });
+    } catch (_n) {}
+
+    await logEvent({ category: "withdrawal", action: "user.request", status: "success", userId: guard.userId, context: { amount, withdrawal_id: inserted?.id || null } });
+    return res.json({ id: inserted?.id || null, status: "requested", amount });
+  } catch (e) {
+    await logEvent({ category: "withdrawal", action: "user.request", status: "error", userId: null, context: { error: e?.message || String(e) } });
+    return res.status(500).json({ error: e?.message || "Erreur interne" });
+  }
+});
+
 app.patch("/api/admin/partenaires/:partnerId", bodyParser.json(), async (req, res) => {
   try {
     const { partnerId } = req.params;
