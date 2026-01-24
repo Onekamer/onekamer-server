@@ -132,6 +132,151 @@ app.get("/api/market/fx-rate", async (req, res) => {
   }
 });
 
+// Obtenir (ou régénérer) une session de paiement Stripe Checkout pour une commande acheteur
+app.get("/api/market/orders/:orderId/pay", async (req, res) => {
+  try {
+    const guard = await requireUserJWT(req);
+    if (!guard.ok) return res.status(guard.status).json({ error: guard.error });
+
+    const { orderId } = req.params;
+    if (!orderId) return res.status(400).json({ error: "orderId requis" });
+
+    const { data: order, error: oErr } = await supabase
+      .from("partner_orders")
+      .select("id, partner_id, customer_user_id, status, delivery_mode, charge_currency, charge_amount_total, platform_fee_amount")
+      .eq("id", orderId)
+      .maybeSingle();
+    if (oErr) return res.status(500).json({ error: oErr.message || "Erreur lecture commande" });
+    if (!order) return res.status(404).json({ error: "order_not_found" });
+    if (order.customer_user_id !== guard.userId) return res.status(403).json({ error: "forbidden" });
+
+    const rawStatus = String(order.status || '').toLowerCase();
+    if (rawStatus === 'paid') return res.status(400).json({ error: "order_already_paid" });
+    if (rawStatus === 'cancelled' || rawStatus === 'canceled') return res.status(400).json({ error: "order_cancelled" });
+
+    // 1) Réutiliser une session Stripe ouverte si disponible
+    let lastSessionId = null;
+    try {
+      const { data: pays } = await supabase
+        .from("partner_order_payments")
+        .select("stripe_checkout_session_id, provider")
+        .eq("order_id", orderId)
+        .eq("provider", "stripe")
+        .order("created_at", { ascending: false })
+        .limit(1);
+      if (Array.isArray(pays) && pays[0]?.stripe_checkout_session_id) {
+        lastSessionId = String(pays[0].stripe_checkout_session_id);
+      }
+    } catch {}
+
+    if (lastSessionId) {
+      try {
+        const session = await stripe.checkout.sessions.retrieve(lastSessionId);
+        const okOrder = String(session?.metadata?.market_order_id || '') === String(orderId);
+        const isOpen = String(session?.status || '').toLowerCase() === 'open';
+        if (okOrder && isOpen && session?.url) {
+          return res.json({ url: session.url });
+        }
+      } catch {}
+    }
+
+    // 2) Créer une nouvelle session Stripe Checkout
+    const { data: partner, error: pErr } = await supabase
+      .from("partners_market")
+      .select("id, status, payout_status, is_open, stripe_connect_account_id")
+      .eq("id", order.partner_id)
+      .maybeSingle();
+    if (pErr) return res.status(500).json({ error: pErr.message || "Erreur lecture partenaire" });
+    if (!partner) return res.status(404).json({ error: "partner_not_found" });
+
+    const currency = String(order.charge_currency || "").toLowerCase();
+    const unitAmount = Number(order.charge_amount_total);
+    if (!currency || !Number.isFinite(unitAmount) || unitAmount <= 0) {
+      return res.status(400).json({ error: "order_amount_invalid" });
+    }
+
+    const destinationAccount = partner?.stripe_connect_account_id ? String(partner.stripe_connect_account_id) : null;
+    if (!destinationAccount) return res.status(400).json({ error: "partner_connect_account_missing" });
+
+    let applicationFeeAmount = Number(order.platform_fee_amount);
+    if (!Number.isFinite(applicationFeeAmount) || applicationFeeAmount < 0) applicationFeeAmount = 0;
+    if (applicationFeeAmount > unitAmount) return res.status(400).json({ error: "order_fee_too_high" });
+
+    const frontendBase = String(process.env.FRONTEND_URL || "").replace(/\/$/, "");
+    if (!frontendBase) return res.status(500).json({ error: "FRONTEND_URL manquant" });
+
+    const sessionStripe = await stripe.checkout.sessions.create({
+      payment_method_types: ["card"],
+      payment_intent_data: {
+        application_fee_amount: applicationFeeAmount,
+        transfer_data: { destination: destinationAccount },
+      },
+      billing_address_collection: "required",
+      phone_number_collection: { enabled: true },
+      line_items: [
+        {
+          price_data: {
+            currency,
+            product_data: { name: "Commande Partenaire — OneKamer" },
+            unit_amount: unitAmount,
+          },
+          quantity: 1,
+        },
+      ],
+      mode: "payment",
+      success_url: `${frontendBase}/paiement-success?session_id={CHECKOUT_SESSION_ID}`,
+      cancel_url: `${frontendBase}/paiement-annule`,
+      metadata: { market_order_id: orderId, partner_id: order.partner_id, customer_user_id: guard.userId },
+    });
+
+    await supabase.from("partner_order_payments").insert({
+      order_id: orderId,
+      provider: "stripe",
+      stripe_checkout_session_id: sessionStripe.id,
+      status: "created",
+    });
+
+    await supabase.from("partner_orders").update({ status: "payment_pending" }).eq("id", orderId);
+
+    return res.json({ url: sessionStripe.url });
+  } catch (e) {
+    return res.status(500).json({ error: e?.message || "Erreur interne" });
+  }
+});
+
+// Annuler une commande (par acheteur) si non payée
+app.post("/api/market/orders/:orderId/cancel", async (req, res) => {
+  try {
+    const guard = await requireUserJWT(req);
+    if (!guard.ok) return res.status(guard.status).json({ error: guard.error });
+
+    const { orderId } = req.params;
+    if (!orderId) return res.status(400).json({ error: "orderId requis" });
+
+    const { data: order, error: oErr } = await supabase
+      .from("partner_orders")
+      .select("id, customer_user_id, status")
+      .eq("id", orderId)
+      .maybeSingle();
+    if (oErr) return res.status(500).json({ error: oErr.message || "Erreur lecture commande" });
+    if (!order) return res.status(404).json({ error: "order_not_found" });
+    if (order.customer_user_id !== guard.userId) return res.status(403).json({ error: "forbidden" });
+
+    const s = String(order.status || '').toLowerCase();
+    if (s === 'paid') return res.status(400).json({ error: "order_already_paid" });
+
+    const { error } = await supabase
+      .from("partner_orders")
+      .update({ status: "cancelled", fulfillment_status: "completed", fulfillment_updated_at: new Date().toISOString(), updated_at: new Date().toISOString() })
+      .eq("id", orderId);
+    if (error) return res.status(500).json({ error: error.message || "Erreur annulation" });
+
+    return res.json({ success: true });
+  } catch (e) {
+    return res.status(500).json({ error: e?.message || "Erreur interne" });
+  }
+});
+
 app.post("/api/events/:eventId/intent", async (req, res) => {
   const { eventId } = req.params;
 
