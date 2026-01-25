@@ -1271,34 +1271,55 @@ app.get("/api/market/partners/:partnerId/orders", async (req, res) => {
     if (!auth.ok) return res.status(auth.status).json({ error: auth.error });
 
     const statusFilter = String(req.query.status || "all").trim().toLowerCase();
+    const fulfillmentFilter = String(req.query.fulfillment || "all").trim().toLowerCase();
     const limit = Math.min(Math.max(parseInt(req.query.limit, 10) || 50, 1), 200);
     const offset = Math.max(parseInt(req.query.offset, 10) || 0, 0);
 
     let query = supabase
       .from("partner_orders")
       .select(
-        "id, partner_id, customer_user_id, status, delivery_mode, customer_note, customer_country_code, base_currency, base_amount_total, charge_currency, charge_amount_total, platform_fee_amount, partner_amount, created_at, updated_at"
+        "id, partner_id, customer_user_id, status, delivery_mode, customer_note, customer_country_code, base_currency, base_amount_total, charge_currency, charge_amount_total, platform_fee_amount, partner_amount, fulfillment_status, fulfillment_updated_at, created_at, updated_at, order_number"
       )
       .eq("partner_id", partnerId)
       .order("created_at", { ascending: false })
       .range(offset, offset + limit - 1);
 
-    if (statusFilter && statusFilter !== "all") {
-      if (statusFilter === "pending") {
-        query = query.in("status", ["created", "payment_pending"]);
-      } else if (statusFilter === "paid") {
-        query = query.eq("status", "paid");
-      } else if (statusFilter === "canceled" || statusFilter === "cancelled") {
-        query = query.in("status", ["canceled", "cancelled"]);
-      } else {
-        query = query.eq("status", statusFilter);
+    const paidStates = ["paid", "refunded", "disputed"];
+    query = query.in("status", paidStates);
+
+    if (!fulfillmentFilter || fulfillmentFilter === "all") {
+      if (statusFilter && statusFilter !== "all") {
+        if (statusFilter === "pending") {
+          query = query.in("status", ["created", "payment_pending"]);
+        } else if (statusFilter === "paid") {
+          query = query.eq("status", "paid");
+        } else if (statusFilter === "canceled" || statusFilter === "cancelled") {
+          query = query.in("status", ["canceled", "cancelled"]);
+        } else {
+          query = query.eq("status", statusFilter);
+        }
       }
     }
 
     const { data: orders, error: oErr } = await query;
     if (oErr) return res.status(500).json({ error: oErr.message || "Erreur lecture commandes" });
 
-    const safeOrders = Array.isArray(orders) ? orders : [];
+    let safeOrders = Array.isArray(orders) ? orders : [];
+    const normalizeFulfillment = (o) => {
+      const s = String(o?.status || '').toLowerCase();
+      if (s === 'canceled' || s === 'cancelled') return 'completed';
+      if (paidStates.includes(s)) {
+        const f = String(o?.fulfillment_status || '').toLowerCase();
+        return f || 'sent_to_seller';
+      }
+      return o?.fulfillment_status || null;
+    };
+
+    if (fulfillmentFilter && fulfillmentFilter !== 'all') {
+      const list = fulfillmentFilter.split(',').map((x) => x.trim().toLowerCase()).filter(Boolean);
+      safeOrders = safeOrders.filter((o) => list.includes(normalizeFulfillment(o)));
+    }
+
     const orderIds = safeOrders.map((o) => o.id).filter(Boolean);
 
     let itemsByOrderId = {};
@@ -1324,33 +1345,65 @@ app.get("/api/market/partners/:partnerId/orders", async (req, res) => {
       new Set(safeOrders.map((o) => (o?.customer_user_id ? String(o.customer_user_id) : null)).filter(Boolean))
     );
 
-    const emailByUserId = {};
-    if (uniqueCustomerIds.length > 0 && supabase?.auth?.admin?.getUserById) {
-      await Promise.all(
-        uniqueCustomerIds.map(async (uid) => {
-          try {
-            const { data: uData, error: uErr } = await supabase.auth.admin.getUserById(uid);
-            if (uErr) return;
-            const email = String(uData?.user?.email || "").trim();
-            if (email) emailByUserId[uid] = email;
-          } catch {
-            // ignore
-          }
-        })
-      );
+    const aliasByUserId = {};
+    if (uniqueCustomerIds.length > 0) {
+      uniqueCustomerIds.forEach((uid) => {
+        aliasByUserId[uid] = `#${uid.slice(0, 6)}`;
+      });
     }
 
     const enriched = safeOrders.map((o) => {
       const oid = o?.id ? String(o.id) : null;
       const uid = o?.customer_user_id ? String(o.customer_user_id) : null;
+      const f = normalizeFulfillment(o);
       return {
         ...o,
-        customer_email: uid ? emailByUserId[uid] || null : null,
+        fulfillment_status: f,
+        customer_alias: uid ? aliasByUserId[uid] || `#${uid.slice(0, 6)}` : null,
         items: oid ? itemsByOrderId[oid] || [] : [],
       };
     });
 
     return res.json({ orders: enriched, limit, offset });
+  } catch (e) {
+    return res.status(500).json({ error: e?.message || "Erreur interne" });
+  }
+});
+
+app.post("/api/market/partners/:partnerId/orders/:orderId/mark-received", async (req, res) => {
+  try {
+    const { partnerId, orderId } = req.params;
+    if (!partnerId || !orderId) return res.status(400).json({ error: "partnerId et orderId requis" });
+
+    const auth = await requirePartnerOwner({ req, partnerId });
+    if (!auth.ok) return res.status(auth.status).json({ error: auth.error });
+
+    const { data: order, error: oErr } = await supabase
+      .from("partner_orders")
+      .select("id, partner_id, status, fulfillment_status")
+      .eq("id", orderId)
+      .eq("partner_id", partnerId)
+      .maybeSingle();
+    if (oErr) return res.status(500).json({ error: oErr.message || "Erreur lecture commande" });
+    if (!order) return res.status(404).json({ error: "order_not_found" });
+
+    const s = String(order.status || "").toLowerCase();
+    const f = String(order.fulfillment_status || "").toLowerCase();
+    if (!["paid", "refunded", "disputed"].includes(s)) return res.status(400).json({ error: "order_payment_invalid" });
+    if (f !== "sent_to_seller") return res.status(400).json({ error: "fulfillment_transition_invalid" });
+
+    const { error: upErr } = await supabase
+      .from("partner_orders")
+      .update({
+        fulfillment_status: "preparing",
+        fulfillment_updated_at: new Date().toISOString(),
+        updated_at: new Date().toISOString(),
+      })
+      .eq("id", orderId)
+      .eq("partner_id", partnerId);
+    if (upErr) return res.status(500).json({ error: upErr.message || "update_failed" });
+
+    return res.json({ success: true, fulfillment_status: "preparing" });
   } catch (e) {
     return res.status(500).json({ error: e?.message || "Erreur interne" });
   }
@@ -2172,8 +2225,31 @@ app.post("/api/market/orders", bodyParser.json(), async (req, res) => {
       });
     }
 
+    // Calcul des frais de livraison (en devise de base boutique)
+    const deliveryRaw = String(delivery_mode || "").toLowerCase();
+    const shippingType = ["pickup", "standard", "express", "international"].includes(deliveryRaw)
+      ? deliveryRaw
+      : "pickup";
+
+    let shippingFeeBase = 0;
+    if (shippingType !== "pickup") {
+      const { data: shipRow, error: shipErr } = await supabase
+        .from("shipping_options")
+        .select("shipping_type, price_cents, is_active")
+        .eq("shop_id", partnerId)
+        .eq("shipping_type", shippingType)
+        .maybeSingle();
+      if (shipErr) return res.status(500).json({ error: shipErr.message || "Erreur lecture options livraison" });
+      if (!shipRow || shipRow.is_active !== true) {
+        return res.status(400).json({ error: "shipping_option_unavailable" });
+      }
+      shippingFeeBase = Math.max(parseInt(shipRow.price_cents, 10) || 0, 0);
+    }
+
+    const baseTotalWithShip = baseTotal + shippingFeeBase;
+
     const { amount: chargeTotal, rate } = await fxService.convertMinorAmount({
-      amount: baseTotal,
+      amount: baseTotalWithShip,
       fromCurrency: baseCurrency,
       toCurrency: chargeCurrency,
     });
@@ -2186,13 +2262,15 @@ app.post("/api/market/orders", bodyParser.json(), async (req, res) => {
     const platformFee = Math.max(percentFee + fixedFee, 0);
     const partnerAmount = Math.max(chargeTotal - platformFee, 0);
 
+    const modeNorm = String(delivery_mode || "").toLowerCase();
+
     const { data: inserted, error: oErr } = await supabase
       .from("partner_orders")
       .insert({
         partner_id: partnerId,
         customer_user_id: guard.userId,
         status: "created",
-        delivery_mode: delivery_mode === "partner_delivery" ? "partner_delivery" : "pickup",
+        delivery_mode: modeNorm && modeNorm !== "pickup" ? "partner_delivery" : "pickup",
         customer_note: customer_note ? String(customer_note) : null,
         customer_country_code: customerCountryCode,
         base_currency: baseCurrency,
