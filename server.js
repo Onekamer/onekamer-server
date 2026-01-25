@@ -233,10 +233,10 @@ app.get("/api/market/orders/:orderId/pay", async (req, res) => {
       order_id: orderId,
       provider: "stripe",
       stripe_checkout_session_id: sessionStripe.id,
-      status: "created",
+      status: "pending",
     });
 
-    await supabase.from("partner_orders").update({ status: "payment_pending" }).eq("id", orderId);
+    await supabase.from("partner_orders").update({ status: "pending" }).eq("id", orderId);
 
     return res.json({ url: sessionStripe.url });
   } catch (e) {
@@ -1290,7 +1290,7 @@ app.get("/api/market/partners/:partnerId/orders", async (req, res) => {
     if (!fulfillmentFilter || fulfillmentFilter === "all") {
       if (statusFilter && statusFilter !== "all") {
         if (statusFilter === "pending") {
-          query = query.in("status", ["created", "payment_pending"]);
+          query = query.eq("status", "pending");
         } else if (statusFilter === "paid") {
           query = query.eq("status", "paid");
         } else if (statusFilter === "canceled" || statusFilter === "cancelled") {
@@ -2316,7 +2316,7 @@ app.post("/api/market/orders/:orderId/checkout", bodyParser.json(), async (req, 
     if (oErr) return res.status(500).json({ error: oErr.message || "Erreur lecture commande" });
     if (!order) return res.status(404).json({ error: "order_not_found" });
     if (order.customer_user_id !== guard.userId) return res.status(403).json({ error: "forbidden" });
-    if (!["created", "payment_pending"].includes(String(order.status || ""))) {
+    if (String(order.status || "").toLowerCase() !== "pending") {
       return res.status(400).json({ error: "order_status_invalid" });
     }
 
@@ -2389,7 +2389,7 @@ app.post("/api/market/orders/:orderId/checkout", bodyParser.json(), async (req, 
 
     await supabase
       .from("partner_orders")
-      .update({ status: "payment_pending" })
+      .update({ status: "pending" })
       .eq("id", orderId);
 
     return res.json({ success: true, url: sessionStripe.url });
@@ -2414,7 +2414,7 @@ app.post("/api/market/orders/:orderId/intent", bodyParser.json(), async (req, re
     if (oErr) return res.status(500).json({ error: oErr.message || "Erreur lecture commande" });
     if (!order) return res.status(404).json({ error: "order_not_found" });
     if (order.customer_user_id !== guard.userId) return res.status(403).json({ error: "forbidden" });
-    if (!["created", "payment_pending"].includes(String(order.status || ""))) {
+    if (String(order.status || "").toLowerCase() !== "pending") {
       return res.status(400).json({ error: "order_status_invalid" });
     }
 
@@ -2485,7 +2485,7 @@ app.post("/api/market/orders/:orderId/intent", bodyParser.json(), async (req, re
       if (insErr) return res.status(500).json({ error: insErr.message || "Erreur création paiement" });
     }
 
-    await supabase.from("partner_orders").update({ status: "payment_pending" }).eq("id", orderId);
+    await supabase.from("partner_orders").update({ status: "pending" }).eq("id", orderId);
 
     const partnerAmount = Math.max(unitAmount - applicationFeeAmount, 0);
     return res.json({ clientSecret: pi.client_secret, order: { amount: unitAmount, currency, platform_fee: applicationFeeAmount, partner_amount: partnerAmount } });
