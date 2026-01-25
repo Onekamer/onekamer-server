@@ -2269,7 +2269,7 @@ app.post("/api/market/orders", bodyParser.json(), async (req, res) => {
       .insert({
         partner_id: partnerId,
         customer_user_id: guard.userId,
-        status: "created",
+        status: "pending",
         delivery_mode: modeNorm && modeNorm !== "pickup" ? "partner_delivery" : "pickup",
         customer_note: customer_note ? String(customer_note) : null,
         customer_country_code: customerCountryCode,
