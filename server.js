@@ -18,6 +18,7 @@ import fixEvenementsImagesRoute from "./api/fix-evenements-images.js";
 import pushRouter from "./api/push.js";
 import webpush from "web-push";
 import admin from "firebase-admin";
+import apn from "apn";
 import qrcodeRouter from "./api/qrcode.js";
 import iapRouter from "./api/iap.js";
 import cron from "node-cron";
@@ -4693,6 +4694,66 @@ function initFirebaseAdminOnce() {
   }
 }
 
+// ======================
+// 🍎 APNs (iOS) support
+// ======================
+const APNS_TEAM_ID = process.env.APNS_TEAM_ID;
+const APNS_KEY_ID = process.env.APNS_KEY_ID;
+const APNS_BUNDLE_ID = process.env.APNS_BUNDLE_ID; // topic
+const APNS_PRIVATE_KEY = process.env.APNS_PRIVATE_KEY;
+const APNS_ENV = (process.env.APNS_ENV || "sandbox").toLowerCase();
+
+let apnProvider = null;
+function getApnProvider() {
+  if (apnProvider) return apnProvider;
+  if (!APNS_TEAM_ID || !APNS_KEY_ID || !APNS_BUNDLE_ID || !APNS_PRIVATE_KEY) {
+    return null;
+  }
+  const key = APNS_PRIVATE_KEY.includes("\\n") ? APNS_PRIVATE_KEY.replace(/\\n/g, "\n") : APNS_PRIVATE_KEY;
+  apnProvider = new apn.Provider({
+    token: { key, keyId: APNS_KEY_ID, teamId: APNS_TEAM_ID },
+    production: APNS_ENV === "production",
+  });
+  return apnProvider;
+}
+
+async function sendApnsToUsers({ targetUserIds = [], title = "OneKamer", message = "", url = "/", data = {} }) {
+  if (!Array.isArray(targetUserIds) || targetUserIds.length === 0) return { sent: 0, tokens: 0 };
+  const provider = getApnProvider();
+  if (!provider) return { sent: 0, tokens: 0, skipped: "apns_not_configured" };
+
+  const { data: rows, error } = await supabase
+    .from("device_push_tokens")
+    .select("user_id, token")
+    .in("user_id", targetUserIds)
+    .eq("platform", "ios")
+    .eq("provider", "apns")
+    .eq("enabled", true);
+
+  if (error) return { sent: 0, tokens: 0, skipped: "tokens_read_error" };
+
+  const tokens = (rows || []).map((r) => r.token).filter(Boolean);
+  if (tokens.length === 0) return { sent: 0, tokens: 0 };
+
+  let sent = 0;
+  for (const t of tokens) {
+    const note = new apn.Notification();
+    note.topic = APNS_BUNDLE_ID;
+    note.alert = { title: title || "OneKamer", body: message || "" };
+    note.sound = "default";
+    note.pushType = "alert";
+    note.priority = 10;
+    note.payload = { data, url };
+    try {
+      const result = await provider.send(note, t);
+      sent += result?.sent?.length || 0;
+    } catch (_e) {
+      // best-effort
+    }
+  }
+  return { sent, tokens: tokens.length };
+}
+
 async function sendNativeFcmToUsers({ targetUserIds = [], title = "OneKamer", message = "", url = "/", data = {} }) {
   if (!Array.isArray(targetUserIds) || targetUserIds.length === 0) return { sent: 0, tokens: 0 };
   if (!initFirebaseAdminOnce()) return { sent: 0, tokens: 0, skipped: "firebase_not_configured" };
@@ -7457,6 +7518,7 @@ app.post("/notifications/dispatch", async (req, res) => {
     }
 
     const nativeResult = await sendNativeFcmToUsers({ title, message, targetUserIds, data, url });
+    const iosResult = await sendApnsToUsers({ title, message, targetUserIds, data, url });
 
     await logEvent({
       category: "notifications",
@@ -7466,12 +7528,14 @@ app.post("/notifications/dispatch", async (req, res) => {
         target_count: targetUserIds.length,
         sent_web: sentWeb,
         sent_native: nativeResult?.sent ?? 0,
+        sent_ios: iosResult?.sent ?? 0,
         native_tokens: nativeResult?.tokens ?? 0,
+        ios_tokens: iosResult?.tokens ?? 0,
         native_skipped: nativeResult?.skipped ?? null,
       },
     });
 
-    res.json({ success: true, sentWeb, native: nativeResult });
+    res.json({ success: true, sentWeb, native: nativeResult, ios: iosResult });
   } catch (e) {
     console.error("❌ Erreur /notifications/dispatch:", e);
     await logEvent({ category: "notifications", action: "dispatch", status: "error", context: { error: e?.message || e } });
