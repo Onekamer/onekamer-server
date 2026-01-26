@@ -110,7 +110,62 @@ app.get("/api/admin/support/requests", async (req, res) => {
 
     const { data, error, count } = await q;
     if (error) return res.status(500).json({ error: error.message || "Erreur lecture support_requests" });
-    return res.json({ items: data || [], limit, offset, total: count ?? null });
+
+    const items = Array.isArray(data) ? data : [];
+    const userIds = new Set();
+    for (const it of items) {
+      if (it?.user_id) userIds.add(String(it.user_id));
+      if (it?.target_user_id) userIds.add(String(it.target_user_id));
+    }
+
+    const ids = Array.from(userIds.values());
+    const profById = new Map();
+    const emailById = {};
+
+    if (ids.length > 0) {
+      const { data: profs, error: pErr } = await supabase
+        .from("profiles")
+        .select("id, username, full_name")
+        .in("id", ids);
+      if (pErr) return res.status(500).json({ error: pErr.message || "Erreur lecture profils" });
+      (profs || []).forEach((p) => {
+        if (p?.id) profById.set(String(p.id), p);
+      });
+
+      if (supabase?.auth?.admin?.getUserById) {
+        await Promise.all(
+          ids.map(async (uid) => {
+            try {
+              const { data: uData, error: uErr } = await supabase.auth.admin.getUserById(uid);
+              if (!uErr) {
+                const email = String(uData?.user?.email || "").trim();
+                if (email) emailById[String(uid)] = email;
+              }
+            } catch {
+              // ignore
+            }
+          })
+        );
+      }
+    }
+
+    const enriched = items.map((it) => {
+      const uid = it?.user_id ? String(it.user_id) : null;
+      const tid = it?.target_user_id ? String(it.target_user_id) : null;
+      const up = uid ? profById.get(uid) || {} : {};
+      const tp = tid ? profById.get(tid) || {} : {};
+      return {
+        ...it,
+        user_username: up.username || null,
+        user_full_name: up.full_name || null,
+        user_email: uid ? emailById[uid] || null : null,
+        target_username: tp.username || null,
+        target_full_name: tp.full_name || null,
+        target_email: tid ? emailById[tid] || null : null,
+      };
+    });
+
+    return res.json({ items: enriched, limit, offset, total: count ?? null });
   } catch (e) {
     return res.status(500).json({ error: e?.message || "Erreur interne" });
   }
@@ -166,7 +221,49 @@ app.get("/api/admin/shop-reports", async (req, res) => {
 
     const { data, error, count } = await q;
     if (error) return res.status(500).json({ error: error.message || "Erreur lecture shop_reports" });
-    return res.json({ items: data || [], limit, offset, total: count ?? null });
+
+    const items = Array.isArray(data) ? data : [];
+    const reporterIds = Array.from(new Set(items.map((i) => i?.reporter_id).filter(Boolean).map(String)));
+    const profById = new Map();
+    const emailById = {};
+    if (reporterIds.length > 0) {
+      const { data: profs, error: pErr } = await supabase
+        .from("profiles")
+        .select("id, username, full_name")
+        .in("id", reporterIds);
+      if (pErr) return res.status(500).json({ error: pErr.message || "Erreur lecture profils" });
+      (profs || []).forEach((p) => {
+        if (p?.id) profById.set(String(p.id), p);
+      });
+      if (supabase?.auth?.admin?.getUserById) {
+        await Promise.all(
+          reporterIds.map(async (uid) => {
+            try {
+              const { data: uData, error: uErr } = await supabase.auth.admin.getUserById(uid);
+              if (!uErr) {
+                const email = String(uData?.user?.email || "").trim();
+                if (email) emailById[String(uid)] = email;
+              }
+            } catch {
+              // ignore
+            }
+          })
+        );
+      }
+    }
+
+    const enriched = items.map((it) => {
+      const rid = it?.reporter_id ? String(it.reporter_id) : null;
+      const rp = rid ? profById.get(rid) || {} : {};
+      return {
+        ...it,
+        reporter_username: rp.username || null,
+        reporter_full_name: rp.full_name || null,
+        reporter_email: rid ? emailById[rid] || null : null,
+      };
+    });
+
+    return res.json({ items: enriched, limit, offset, total: count ?? null });
   } catch (e) {
     return res.status(500).json({ error: e?.message || "Erreur interne" });
   }
@@ -217,7 +314,49 @@ app.get("/api/admin/account-deletions", async (req, res) => {
       .order("created_at", { ascending: false })
       .range(offset, offset + limit - 1);
     if (error) return res.status(500).json({ error: error.message || "Erreur lecture deletions" });
-    return res.json({ items: data || [], limit, offset });
+
+    const items = Array.isArray(data) ? data : [];
+    const ids = Array.from(new Set(items.map((i) => i?.deleted_user_id).filter(Boolean).map(String)));
+    const profById = new Map();
+    const emailById = {};
+    if (ids.length > 0) {
+      const { data: profs, error: pErr } = await supabase
+        .from("profiles")
+        .select("id, username, full_name")
+        .in("id", ids);
+      if (pErr) return res.status(500).json({ error: pErr.message || "Erreur lecture profils" });
+      (profs || []).forEach((p) => {
+        if (p?.id) profById.set(String(p.id), p);
+      });
+      if (supabase?.auth?.admin?.getUserById) {
+        await Promise.all(
+          ids.map(async (uid) => {
+            try {
+              const { data: uData, error: uErr } = await supabase.auth.admin.getUserById(uid);
+              if (!uErr) {
+                const email = String(uData?.user?.email || "").trim();
+                if (email) emailById[String(uid)] = email;
+              }
+            } catch {
+              // ignore
+            }
+          })
+        );
+      }
+    }
+
+    const enriched = items.map((it) => {
+      const uid = it?.deleted_user_id ? String(it.deleted_user_id) : null;
+      const p = uid ? profById.get(uid) || {} : {};
+      return {
+        ...it,
+        username: p.username || null,
+        full_name: p.full_name || null,
+        email: uid ? emailById[uid] || null : null,
+      };
+    });
+
+    return res.json({ items: enriched, limit, offset });
   } catch (e) {
     return res.status(500).json({ error: e?.message || "Erreur interne" });
   }
