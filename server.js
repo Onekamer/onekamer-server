@@ -82,6 +82,22 @@ app.get("/api/stripe/config", (_req, res) => {
   return res.json({ publishableKey: pk });
 });
 
+// Top donateurs OK COINS (lecture publique via service-role)
+app.get("/api/okcoins/top-donors", async (req, res) => {
+  try {
+    const limit = Math.min(Math.max(parseInt(req.query?.limit, 10) || 3, 1), 50);
+    const { data, error } = await supabase
+      .from("okcoins_users_balance")
+      .select("user_id, donor_level, points_total, profiles(username, avatar_url)")
+      .order("points_total", { ascending: false })
+      .limit(limit);
+    if (error) return res.status(500).json({ error: error.message || "Erreur lecture top donateurs" });
+    return res.json({ items: Array.isArray(data) ? data : [], limit });
+  } catch (e) {
+    return res.status(500).json({ error: e?.message || "Erreur interne" });
+  }
+});
+
 // Soft delete d'un utilisateur par un admin
 app.post("/api/admin/users/:id/soft-delete", async (req, res) => {
   try {
