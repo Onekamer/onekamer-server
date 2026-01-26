@@ -145,7 +145,18 @@ app.post("/api/admin/users/:id/soft-delete", async (req, res) => {
       }
     }
 
-    return res.json({ item: updated, email_notice: emailSent });
+    // Supprimer les demandes de suppression enregistrées (si présentes)
+    let deletedLogs = 0;
+    try {
+      const { count } = await supabase
+        .from("account_deletion_logs")
+        .delete()
+        .eq("deleted_user_id", id)
+        .select("id", { count: "exact" });
+      deletedLogs = count || 0;
+    } catch {}
+
+    return res.json({ item: updated, email_notice: emailSent, deleted_logs: deletedLogs });
   } catch (e) {
     return res.status(500).json({ error: e?.message || "Erreur interne" });
   }
@@ -165,6 +176,12 @@ app.get("/api/admin/support/requests", async (req, res) => {
 
     const typeRaw = req.query?.type ? String(req.query.type).toLowerCase() : "";
     const statusRaw = req.query?.status ? String(req.query.status).toLowerCase() : "";
+    const mapStatusFilter = (s) => {
+      if (s === "in_review") return "open";
+      if (s === "resolved") return "closed";
+      return s;
+    };
+    const statusDb = mapStatusFilter(statusRaw);
     const limit = Math.min(Math.max(parseInt(req.query?.limit, 10) || 50, 1), 200);
     const offset = Math.max(parseInt(req.query?.offset, 10) || 0, 0);
 
@@ -175,7 +192,7 @@ app.get("/api/admin/support/requests", async (req, res) => {
       .range(offset, offset + limit - 1);
 
     if (typeRaw) q = q.eq("type", typeRaw);
-    if (statusRaw) q = q.eq("status", statusRaw);
+    if (statusDb) q = q.eq("status", statusDb);
 
     const { data, error, count } = await q;
     if (error) return res.status(500).json({ error: error.message || "Erreur lecture support_requests" });
@@ -251,9 +268,16 @@ app.patch("/api/admin/support/requests/:id", bodyParser.json(), async (req, res)
       return res.status(status).json({ error: verif.reason });
     }
 
-    const allowed = new Set(["new", "in_review", "resolved"]);
-    const next = String(req.body?.status || "").toLowerCase();
-    if (!allowed.has(next)) return res.status(400).json({ error: "statut invalide" });
+    const input = String(req.body?.status || "").toLowerCase();
+    const mapStatus = (s) => {
+      if (s === "in_review" || s === "open") return "open";
+      if (s === "resolved" || s === "closed") return "closed";
+      if (s === "new") return "new";
+      if (s === "pending") return "pending";
+      return null;
+    };
+    const next = mapStatus(input);
+    if (!next) return res.status(400).json({ error: "statut invalide" });
 
     const { error, data } = await supabase
       .from("support_requests")
