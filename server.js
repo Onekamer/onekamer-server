@@ -82,6 +82,147 @@ app.get("/api/stripe/config", (_req, res) => {
   return res.json({ publishableKey: pk });
 });
 
+// ============================================================
+// 🛠️ Admin Support Center: support_requests, shop_reports, deletions
+// ============================================================
+
+app.get("/api/admin/support/requests", async (req, res) => {
+  try {
+    const verif = await verifyIsAdminJWT(req);
+    if (!verif.ok) {
+      const status = verif.reason === "forbidden" ? 403 : 401;
+      return res.status(status).json({ error: verif.reason });
+    }
+
+    const typeRaw = req.query?.type ? String(req.query.type).toLowerCase() : "";
+    const statusRaw = req.query?.status ? String(req.query.status).toLowerCase() : "";
+    const limit = Math.min(Math.max(parseInt(req.query?.limit, 10) || 50, 1), 200);
+    const offset = Math.max(parseInt(req.query?.offset, 10) || 0, 0);
+
+    let q = supabase
+      .from("support_requests")
+      .select("id, user_id, type, target_user_id, category, message, status, created_at")
+      .order("created_at", { ascending: false })
+      .range(offset, offset + limit - 1);
+
+    if (typeRaw) q = q.eq("type", typeRaw);
+    if (statusRaw) q = q.eq("status", statusRaw);
+
+    const { data, error, count } = await q;
+    if (error) return res.status(500).json({ error: error.message || "Erreur lecture support_requests" });
+    return res.json({ items: data || [], limit, offset, total: count ?? null });
+  } catch (e) {
+    return res.status(500).json({ error: e?.message || "Erreur interne" });
+  }
+});
+
+app.patch("/api/admin/support/requests/:id", bodyParser.json(), async (req, res) => {
+  try {
+    const { id } = req.params;
+    if (!id) return res.status(400).json({ error: "id requis" });
+
+    const verif = await verifyIsAdminJWT(req);
+    if (!verif.ok) {
+      const status = verif.reason === "forbidden" ? 403 : 401;
+      return res.status(status).json({ error: verif.reason });
+    }
+
+    const allowed = new Set(["new", "in_review", "resolved"]);
+    const next = String(req.body?.status || "").toLowerCase();
+    if (!allowed.has(next)) return res.status(400).json({ error: "statut invalide" });
+
+    const { error, data } = await supabase
+      .from("support_requests")
+      .update({ status: next, updated_at: new Date().toISOString() })
+      .eq("id", id)
+      .select("id, status")
+      .maybeSingle();
+    if (error) return res.status(500).json({ error: error.message || "Erreur update support_request" });
+    if (!data) return res.status(404).json({ error: "not_found" });
+    return res.json({ item: data });
+  } catch (e) {
+    return res.status(500).json({ error: e?.message || "Erreur interne" });
+  }
+});
+
+app.get("/api/admin/shop-reports", async (req, res) => {
+  try {
+    const verif = await verifyIsAdminJWT(req);
+    if (!verif.ok) {
+      const status = verif.reason === "forbidden" ? 403 : 401;
+      return res.status(status).json({ error: verif.reason });
+    }
+
+    const statusRaw = req.query?.status ? String(req.query.status).toLowerCase() : "";
+    const limit = Math.min(Math.max(parseInt(req.query?.limit, 10) || 50, 1), 200);
+    const offset = Math.max(parseInt(req.query?.offset, 10) || 0, 0);
+
+    let q = supabase
+      .from("marketplace_shop_reports")
+      .select("id, shop_id, reporter_id, reason, details, status, created_at")
+      .order("created_at", { ascending: false })
+      .range(offset, offset + limit - 1);
+    if (statusRaw) q = q.eq("status", statusRaw);
+
+    const { data, error, count } = await q;
+    if (error) return res.status(500).json({ error: error.message || "Erreur lecture shop_reports" });
+    return res.json({ items: data || [], limit, offset, total: count ?? null });
+  } catch (e) {
+    return res.status(500).json({ error: e?.message || "Erreur interne" });
+  }
+});
+
+app.patch("/api/admin/shop-reports/:id", bodyParser.json(), async (req, res) => {
+  try {
+    const { id } = req.params;
+    if (!id) return res.status(400).json({ error: "id requis" });
+
+    const verif = await verifyIsAdminJWT(req);
+    if (!verif.ok) {
+      const status = verif.reason === "forbidden" ? 403 : 401;
+      return res.status(status).json({ error: verif.reason });
+    }
+
+    const allowed = new Set(["open", "closed"]);
+    const next = String(req.body?.status || "").toLowerCase();
+    if (!allowed.has(next)) return res.status(400).json({ error: "statut invalide" });
+
+    const { data, error } = await supabase
+      .from("marketplace_shop_reports")
+      .update({ status: next, updated_at: new Date().toISOString() })
+      .eq("id", id)
+      .select("id, status")
+      .maybeSingle();
+    if (error) return res.status(500).json({ error: error.message || "Erreur update shop_report" });
+    if (!data) return res.status(404).json({ error: "not_found" });
+    return res.json({ item: data });
+  } catch (e) {
+    return res.status(500).json({ error: e?.message || "Erreur interne" });
+  }
+});
+
+app.get("/api/admin/account-deletions", async (req, res) => {
+  try {
+    const verif = await verifyIsAdminJWT(req);
+    if (!verif.ok) {
+      const status = verif.reason === "forbidden" ? 403 : 401;
+      return res.status(status).json({ error: verif.reason });
+    }
+
+    const limit = Math.min(Math.max(parseInt(req.query?.limit, 10) || 100, 1), 500);
+    const offset = Math.max(parseInt(req.query?.offset, 10) || 0, 0);
+    const { data, error } = await supabase
+      .from("account_deletion_logs")
+      .select("id, deleted_user_id, reason, created_at")
+      .order("created_at", { ascending: false })
+      .range(offset, offset + limit - 1);
+    if (error) return res.status(500).json({ error: error.message || "Erreur lecture deletions" });
+    return res.json({ items: data || [], limit, offset });
+  } catch (e) {
+    return res.status(500).json({ error: e?.message || "Erreur interne" });
+  }
+});
+
 app.post("/api/partner/connect/login-link", bodyParser.json(), async (req, res) => {
   try {
     const { partnerId } = req.body || {};
