@@ -82,6 +82,75 @@ app.get("/api/stripe/config", (_req, res) => {
   return res.json({ publishableKey: pk });
 });
 
+// Soft delete d'un utilisateur par un admin
+app.post("/api/admin/users/:id/soft-delete", async (req, res) => {
+  try {
+    const { id } = req.params;
+    if (!id) return res.status(400).json({ error: "id requis" });
+
+    const verif = await verifyIsAdminJWT(req);
+    if (!verif.ok) {
+      const status = verif.reason === "forbidden" ? 403 : 401;
+      return res.status(status).json({ error: verif.reason });
+    }
+
+    const { data: prof, error: pErr } = await supabase
+      .from("profiles")
+      .select("id, username, full_name, email, is_deleted, deleted_at")
+      .eq("id", id)
+      .maybeSingle();
+    if (pErr) return res.status(500).json({ error: pErr.message || "Erreur lecture profil" });
+    if (!prof) return res.status(404).json({ error: "Utilisateur introuvable" });
+
+    if (prof.is_deleted === true) {
+      return res.json({
+        item: prof,
+        email_notice: false,
+      });
+    }
+
+    const now = new Date().toISOString();
+    const { data: updated, error: uErr } = await supabase
+      .from("profiles")
+      .update({ is_deleted: true, deleted_at: now, updated_at: now })
+      .eq("id", id)
+      .select("id, username, full_name, email, is_deleted, deleted_at")
+      .maybeSingle();
+    if (uErr) return res.status(500).json({ error: uErr.message || "Erreur mise à jour profil" });
+
+    let toEmail = String(updated?.email || "").trim() || null;
+    if (!toEmail && supabase?.auth?.admin?.getUserById) {
+      try {
+        const { data: uData, error: aErr } = await supabase.auth.admin.getUserById(id);
+        if (!aErr) toEmail = String(uData?.user?.email || "").trim() || null;
+      } catch {}
+    }
+
+    let emailSent = false;
+    if (toEmail) {
+      try {
+        const subject = "Confirmation de suppression de compte";
+        const text = [
+          `Bonjour ${updated?.username || updated?.full_name || ""}`.trim(),
+          "\n",
+          "Nous confirmons la suppression de votre compte OneKamer.",
+          "Si vous n'êtes pas à l'origine de cette action, contactez immédiatement le support.",
+          "\n",
+          "— L'équipe OneKamer",
+        ].join("\n");
+        await sendEmailViaBrevo({ to: toEmail, subject, text });
+        emailSent = true;
+      } catch (e) {
+        console.error("❌ Email suppression compte:", e?.message || e);
+      }
+    }
+
+    return res.json({ item: updated, email_notice: emailSent });
+  } catch (e) {
+    return res.status(500).json({ error: e?.message || "Erreur interne" });
+  }
+});
+
 // ============================================================
 // 🛠️ Admin Support Center: support_requests, shop_reports, deletions
 // ============================================================
@@ -125,7 +194,7 @@ app.get("/api/admin/support/requests", async (req, res) => {
     if (ids.length > 0) {
       const { data: profs, error: pErr } = await supabase
         .from("profiles")
-        .select("id, username, full_name")
+        .select("id, username, full_name, email, is_deleted, deleted_at")
         .in("id", ids);
       if (pErr) return res.status(500).json({ error: pErr.message || "Erreur lecture profils" });
       (profs || []).forEach((p) => {
@@ -188,7 +257,7 @@ app.patch("/api/admin/support/requests/:id", bodyParser.json(), async (req, res)
 
     const { error, data } = await supabase
       .from("support_requests")
-      .update({ status: next, updated_at: new Date().toISOString() })
+      .update({ status: next })
       .eq("id", id)
       .select("id, status")
       .maybeSingle();
@@ -286,7 +355,7 @@ app.patch("/api/admin/shop-reports/:id", bodyParser.json(), async (req, res) => 
 
     const { data, error } = await supabase
       .from("marketplace_shop_reports")
-      .update({ status: next, updated_at: new Date().toISOString() })
+      .update({ status: next })
       .eq("id", id)
       .select("id, status")
       .maybeSingle();
@@ -352,7 +421,9 @@ app.get("/api/admin/account-deletions", async (req, res) => {
         ...it,
         username: p.username || null,
         full_name: p.full_name || null,
-        email: uid ? emailById[uid] || null : null,
+        email: uid ? (p.email || emailById[uid] || null) : null,
+        is_deleted: p?.is_deleted ?? null,
+        deleted_at: p?.deleted_at ?? null,
       };
     });
 
