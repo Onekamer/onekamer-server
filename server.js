@@ -7632,7 +7632,7 @@ app.post("/groups/:groupId/join-request", bodyParser.json(), async (req, res) =>
     // Vérifier groupe + fondateur
     const { data: grp, error: gErr } = await supabase
       .from("groupes")
-      .select("id, fondateur_id, est_prive")
+      .select("id, fondateur_id, est_prive, nom")
       .eq("id", groupId)
       .maybeSingle();
     if (gErr || !grp) return res.status(404).json({ error: "groupe introuvable" });
@@ -7663,14 +7663,43 @@ app.post("/groups/:groupId/join-request", bodyParser.json(), async (req, res) =>
       .single();
     if (insErr) return res.status(500).json({ error: insErr.message });
 
-    // Notifier le fondateur
+    // Notifier le fondateur (WhatsApp-style: title=username, body=groupName + "\n" + action)
     const founderId = grp.fondateur_id;
+    const { data: requesterProf } = await supabase
+      .from("profiles")
+      .select("username")
+      .eq("id", requesterId)
+      .maybeSingle();
+
+    const name = requesterProf?.username || "Un membre";
+    const groupLabel = grp?.nom || "Espace groupes";
+    const title = name;
+    const message = `${groupLabel}\nSouhaite rejoindre le groupe.`;
+    const url = `${process.env.FRONTEND_URL}/groupes/${groupId}?tab=demandes`;
+
+    // Web Push
     await notifyUsersNative({
       targetUserIds: [founderId],
-      title: "Demande d'adhésion",
-      message: "Un utilisateur souhaite rejoindre votre groupe",
-      url: `${process.env.FRONTEND_URL}/groupes/${groupId}?tab=demandes`,
+      title,
+      message,
+      url,
       data: { type: "group_join_request", groupId, requesterId }
+    });
+    // FCM
+    await sendNativeFcmToUsers({
+      title,
+      message,
+      targetUserIds: [founderId],
+      data: { type: "group_join_request", groupId, requesterId },
+      url,
+    });
+    // APNs
+    await sendApnsToUsers({
+      title,
+      message,
+      targetUserIds: [founderId],
+      data: { type: "group_join_request", groupId, requesterId },
+      url,
     });
 
     return res.json({ ok: true, requestId: inserted.id });
