@@ -98,6 +98,98 @@ app.get("/api/okcoins/top-donors", async (req, res) => {
   }
 });
 
+// Recommandations Partenaires
+app.get("/api/partners/recommendations", async (req, res) => {
+  try {
+    const idsRaw = String(req.query?.ids || "").trim();
+    if (!idsRaw) return res.json({ items: [] });
+    const ids = idsRaw.split(",").map((s) => s.trim()).filter(Boolean);
+    if (ids.length === 0) return res.json({ items: [] });
+
+    const { data: recs, error } = await supabase
+      .from("partenaires_recommendations")
+      .select("partner_id, user_id")
+      .in("partner_id", ids);
+    if (error) return res.status(500).json({ error: error.message || "Erreur lecture recommandations" });
+
+    let meId = null;
+    const authHeader = req.headers["authorization"] || "";
+    const token = authHeader.startsWith("Bearer ") ? authHeader.slice(7) : null;
+    if (token) {
+      try {
+        const supabaseAuth = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_ANON_KEY);
+        const { data: u, error: uErr } = await supabaseAuth.auth.getUser(token);
+        if (!uErr && u?.user?.id) meId = String(u.user.id);
+      } catch {}
+    }
+
+    const counts = new Map();
+    const mine = new Set();
+    for (const r of Array.isArray(recs) ? recs : []) {
+      const pid = String(r.partner_id);
+      counts.set(pid, (counts.get(pid) || 0) + 1);
+      if (meId && String(r.user_id) === meId) mine.add(pid);
+    }
+
+    const items = ids.map((id) => ({
+      partner_id: id,
+      count: counts.get(String(id)) || 0,
+      recommended_by_me: mine.has(String(id)),
+    }));
+    return res.json({ items });
+  } catch (e) {
+    return res.status(500).json({ error: e?.message || "Erreur interne" });
+  }
+});
+
+app.post("/api/partners/:id/recommend", async (req, res) => {
+  try {
+    const authHeader = req.headers["authorization"] || "";
+    const token = authHeader.startsWith("Bearer ") ? authHeader.slice(7) : null;
+    if (!token) return res.status(401).json({ error: "unauthorized" });
+
+    const supabaseAuth = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_ANON_KEY);
+    const { data: u, error: uErr } = await supabaseAuth.auth.getUser(token);
+    if (uErr || !u?.user?.id) return res.status(401).json({ error: "invalid_token" });
+    const userId = String(u.user.id);
+
+    const { id } = req.params;
+    if (!id) return res.status(400).json({ error: "partner_id_requis" });
+
+    const { data: exists, error: exErr } = await supabase
+      .from("partenaires_recommendations")
+      .select("id")
+      .eq("partner_id", id)
+      .eq("user_id", userId)
+      .maybeSingle();
+    if (exErr) return res.status(500).json({ error: exErr.message || "Erreur lecture reco" });
+
+    let action = "added";
+    if (exists?.id) {
+      const { error: delErr } = await supabase
+        .from("partenaires_recommendations")
+        .delete()
+        .eq("id", exists.id);
+      if (delErr) return res.status(500).json({ error: delErr.message || "Erreur suppression reco" });
+      action = "removed";
+    } else {
+      const { error: insErr } = await supabase
+        .from("partenaires_recommendations")
+        .insert({ partner_id: id, user_id: userId });
+      if (insErr) return res.status(500).json({ error: insErr.message || "Erreur ajout reco" });
+    }
+
+    const { count: c, error: cntErr } = await supabase
+      .from("partenaires_recommendations")
+      .select("id", { count: "exact", head: true })
+      .eq("partner_id", id);
+    if (cntErr) return res.status(500).json({ error: cntErr.message || "Erreur comptage" });
+    return res.json({ action, count: c || 0 });
+  } catch (e) {
+    return res.status(500).json({ error: e?.message || "Erreur interne" });
+  }
+});
+
 // Soft delete d'un utilisateur par un admin
 app.post("/api/admin/users/:id/soft-delete", async (req, res) => {
   try {
