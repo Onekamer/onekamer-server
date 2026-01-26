@@ -2323,6 +2323,7 @@ app.patch("/api/market/partners/:partnerId", bodyParser.json(), async (req, res)
     if (patch.whatsapp !== undefined) update.whatsapp = patch.whatsapp ? String(patch.whatsapp).trim() : null;
     if (patch.address !== undefined) update.address = patch.address ? String(patch.address).trim() : null;
     if (patch.hours !== undefined) update.hours = patch.hours ? String(patch.hours).trim() : null;
+    if (patch.is_open !== undefined) update.is_open = !!patch.is_open;
 
     if ("display_name" in update && !update.display_name) {
       return res.status(400).json({ error: "display_name requis" });
