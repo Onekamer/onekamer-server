@@ -7512,6 +7512,11 @@ app.post("/notifications/dispatch", async (req, res) => {
             sentWeb++;
           } catch (e) {
             console.warn("⚠️ Échec envoi push à", s.user_id, e?.statusCode || e?.message || e);
+            if (e?.statusCode === 404 || e?.statusCode === 410) {
+              try {
+                await supabase.from("push_subscriptions").delete().eq("endpoint", s.endpoint);
+              } catch (_) {}
+            }
           }
         }
       }
@@ -7612,6 +7617,11 @@ async function notifyUsersNative({ targetUserIds = [], title = "OneKamer", messa
           sent++;
         } catch (e) {
           console.warn(" Échec envoi push à", s.user_id, e?.statusCode || e?.message || e);
+          if (e?.statusCode === 404 || e?.statusCode === 410) {
+            try {
+              await supabase.from("push_subscriptions").delete().eq("endpoint", s.endpoint);
+            } catch (_) {}
+          }
         }
       }
     }
@@ -7725,7 +7735,7 @@ app.post("/groups/requests/:requestId/approve", bodyParser.json(), async (req, r
 
     const { data: grp, error: gErr } = await supabase
       .from("groupes")
-      .select("fondateur_id")
+      .select("fondateur_id, nom")
       .eq("id", reqRow.group_id)
       .maybeSingle();
     if (gErr || !grp) return res.status(404).json({ error: "groupe introuvable" });
@@ -7739,12 +7749,34 @@ app.post("/groups/requests/:requestId/approve", bodyParser.json(), async (req, r
 
     await supabase.from("groupes_membres").insert({ groupe_id: reqRow.group_id, user_id: reqRow.requester_id, is_admin: false, role: "membre" });
 
+    const groupLabel = grp?.nom || "Espace groupes";
+    const title = groupLabel;
+    const message = `${groupLabel}\nVotre demande a été approuvée.`;
+    const url = `${process.env.FRONTEND_URL}/groupes/${reqRow.group_id}`;
+
+    // Web Push
     await notifyUsersNative({
       targetUserIds: [reqRow.requester_id],
-      title: "Demande approuvée",
-      message: "Vous avez été ajouté au groupe",
-      url: `${process.env.FRONTEND_URL}/groupes/${reqRow.group_id}`,
-      data: { type: "group_join_result", groupId: reqRow.group_id, status: "approved" }
+      title,
+      message,
+      url,
+      data: { type: "group_join_approved", groupId: reqRow.group_id }
+    });
+    // FCM
+    await sendNativeFcmToUsers({
+      title,
+      message,
+      targetUserIds: [reqRow.requester_id],
+      data: { type: "group_join_approved", groupId: reqRow.group_id },
+      url,
+    });
+    // APNs
+    await sendApnsToUsers({
+      title,
+      message,
+      targetUserIds: [reqRow.requester_id],
+      data: { type: "group_join_approved", groupId: reqRow.group_id },
+      url,
     });
     return res.json({ ok: true });
   } catch (e) {
@@ -7781,13 +7813,6 @@ app.post("/groups/requests/:requestId/deny", bodyParser.json(), async (req, res)
       .eq("id", requestId);
     if (upErr) return res.status(500).json({ error: upErr.message });
 
-    await notifyUsersNative({
-      targetUserIds: [reqRow.requester_id],
-      title: "Demande refusée",
-      message: "Votre demande a été refusée",
-      url: `${process.env.FRONTEND_URL}/groupes/${reqRow.group_id}`,
-      data: { type: "group_join_result", groupId: reqRow.group_id, status: "denied" }
-    });
     return res.json({ ok: true });
   } catch (e) {
     return res.status(500).json({ error: e?.message || "Erreur interne" });
