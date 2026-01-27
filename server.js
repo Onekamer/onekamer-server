@@ -3495,7 +3495,7 @@ app.get("/api/market/orders/:orderId", async (req, res) => {
     const { data: order, error: oErr } = await supabase
       .from("partner_orders")
       .select(
-        "id, partner_id, customer_user_id, status, delivery_mode, customer_note, fulfillment_status, fulfillment_updated_at, buyer_received_at, payout_release_at, base_currency, base_amount_total, charge_currency, charge_amount_total, platform_fee_amount, partner_amount, created_at, updated_at, order_number, customer_first_name, customer_last_name, customer_phone, customer_address_line1, customer_address_line2, customer_address_postal_code, customer_address_city, customer_address_country, customer_country_code"
+        "id, partner_id, customer_user_id, status, delivery_mode, customer_note, fulfillment_status, fulfillment_updated_at, buyer_received_at, payout_release_at, base_currency, base_amount_total, charge_currency, charge_amount_total, platform_fee_amount, partner_amount, created_at, updated_at, order_number, customer_first_name, customer_last_name, customer_phone, customer_address_line1, customer_address_line2, customer_address_postal_code, customer_address_city, customer_address_country, customer_country_code, tracking_url, carrier_name, shipped_at, tracking_added_at"
       )
       .eq("id", orderId)
       .maybeSingle();
@@ -3569,7 +3569,7 @@ app.patch("/api/market/orders/:orderId/fulfillment", bodyParser.json(), async (r
     if (!guard.ok) return res.status(guard.status).json({ error: guard.error });
 
     const { orderId } = req.params;
-    const { status } = req.body || {};
+    const { status, tracking_url, carrier_name } = req.body || {};
     if (!orderId) return res.status(400).json({ error: "orderId requis" });
 
     const next = String(status || "").toLowerCase();
@@ -3578,7 +3578,7 @@ app.patch("/api/market/orders/:orderId/fulfillment", bodyParser.json(), async (r
 
     const { data: order, error: oErr } = await supabase
       .from("partner_orders")
-      .select("id, partner_id, customer_user_id, fulfillment_status, fulfillment_updated_at")
+      .select("id, partner_id, customer_user_id, fulfillment_status, fulfillment_updated_at, tracking_url, carrier_name, shipped_at, tracking_added_at")
       .eq("id", orderId)
       .maybeSingle();
     if (oErr) return res.status(500).json({ error: oErr.message || "Erreur lecture commande" });
@@ -3594,6 +3594,15 @@ app.patch("/api/market/orders/:orderId/fulfillment", bodyParser.json(), async (r
 
     const nowIso = new Date().toISOString();
     const updatePayload = { fulfillment_status: next, fulfillment_updated_at: nowIso, updated_at: nowIso };
+    if (next === "shipping") {
+      const track = typeof tracking_url === "string" ? tracking_url.trim() : "";
+      if (!track) return res.status(400).json({ error: "tracking_url_required" });
+      const carrier = typeof carrier_name === "string" ? carrier_name.trim() : null;
+      updatePayload.tracking_url = track;
+      updatePayload.carrier_name = carrier || null;
+      updatePayload.shipped_at = nowIso;
+      updatePayload.tracking_added_at = nowIso;
+    }
     if (next === "delivered") {
       updatePayload.payout_release_at = new Date(Date.now() + 14 * 24 * 60 * 60 * 1000).toISOString();
     }
@@ -3601,9 +3610,45 @@ app.patch("/api/market/orders/:orderId/fulfillment", bodyParser.json(), async (r
       .from("partner_orders")
       .update(updatePayload)
       .eq("id", orderId)
-      .select("id, fulfillment_status, fulfillment_updated_at")
+      .select("id, fulfillment_status, fulfillment_updated_at, tracking_url, carrier_name, shipped_at, tracking_added_at")
       .maybeSingle();
     if (uErr) return res.status(500).json({ error: uErr.message || "Erreur mise à jour" });
+
+    if (next === "shipping") {
+      try {
+        let convId = null;
+        const { data: conv } = await supabase
+          .from("marketplace_order_conversations")
+          .select("id")
+          .eq("order_id", orderId)
+          .maybeSingle();
+        if (conv?.id) {
+          convId = conv.id;
+        } else {
+          const { data: insertedConv } = await supabase
+            .from("marketplace_order_conversations")
+            .insert({
+              order_id: orderId,
+              buyer_id: order.customer_user_id,
+              seller_id: partner.owner_user_id,
+              created_at: nowIso,
+            })
+            .select("id")
+            .maybeSingle();
+          convId = insertedConv?.id || null;
+        }
+        if (convId) {
+          await supabase
+            .from("marketplace_order_messages")
+            .insert({
+              conversation_id: convId,
+              author_id: guard.userId,
+              body: "Lien de suivi ajouté",
+              created_at: nowIso,
+            });
+        }
+      } catch {}
+    }
 
     try {
       await sendSupabaseLightPush(req, {
@@ -5091,6 +5136,19 @@ async function stripeWebhookHandler(req, res) {
                   .eq("id", orderId)
                   .maybeSingle();
                 if (orderRow?.partner_id) {
+                  try {
+                    const { data: carts } = await supabase
+                      .from("market_carts")
+                      .select("id")
+                      .eq("user_id", customerUserId)
+                      .eq("partner_id", orderRow.partner_id)
+                      .eq("status", "active");
+                    const cartIds = Array.isArray(carts) ? carts.map((c) => c.id).filter(Boolean) : [];
+                    if (cartIds.length > 0) {
+                      await supabase.from("market_cart_items").delete().in("cart_id", cartIds);
+                      await supabase.from("market_carts").delete().in("id", cartIds);
+                    }
+                  } catch {}
                   const { data: partner } = await supabase
                     .from("partners_market")
                     .select("owner_user_id")
