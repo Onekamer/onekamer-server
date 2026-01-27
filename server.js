@@ -5041,7 +5041,24 @@ async function stripeWebhookHandler(req, res) {
 
         if (orderId) {
           try {
-            await supabase.from("partner_orders").update({ status: "paid" }).eq("id", orderId);
+            const nowIso = new Date().toISOString();
+            let existingOrder = null;
+            try {
+              const { data: ord } = await supabase
+                .from("partner_orders")
+                .select("id, fulfillment_status")
+                .eq("id", orderId)
+                .maybeSingle();
+              existingOrder = ord || null;
+            } catch {}
+
+            const updatePayload = { status: "paid", updated_at: nowIso };
+            const currentFs = String(existingOrder?.fulfillment_status || "").toLowerCase();
+            if (!["shipping", "delivered", "completed"].includes(currentFs)) {
+              updatePayload.fulfillment_status = "sent_to_seller";
+              updatePayload.fulfillment_updated_at = nowIso;
+            }
+            await supabase.from("partner_orders").update(updatePayload).eq("id", orderId);
 
             const { data: payRow, error: readErr } = await supabase
               .from("partner_order_payments")
@@ -5064,6 +5081,59 @@ async function stripeWebhookHandler(req, res) {
             }
 
             await logEvent({ category: "marketplace", action: "pi.succeeded", status: "success", userId: customerUserId, context: { orderId, payment_intent_id: pi.id } });
+
+            try {
+              let sellerId = null;
+              try {
+                const { data: orderRow } = await supabase
+                  .from("partner_orders")
+                  .select("id, partner_id, customer_user_id")
+                  .eq("id", orderId)
+                  .maybeSingle();
+                if (orderRow?.partner_id) {
+                  const { data: partner } = await supabase
+                    .from("partners_market")
+                    .select("owner_user_id")
+                    .eq("id", orderRow.partner_id)
+                    .maybeSingle();
+                  sellerId = partner?.owner_user_id ? String(partner.owner_user_id) : null;
+                }
+              } catch {}
+
+              let buyerName = null;
+              try {
+                const { data: buyer } = await supabase
+                  .from("profiles")
+                  .select("username")
+                  .eq("id", customerUserId)
+                  .maybeSingle();
+                buyerName = buyer?.username || null;
+              } catch {}
+
+              if (sellerId) {
+                const title = "🛒 Nouvelle commande";
+                const body = `Espace Marketplace -\nCommande ${orderId}${buyerName ? ` par ${buyerName}` : ""}`;
+                await sendSupabaseLightPush(req, {
+                  title,
+                  message: body,
+                  targetUserIds: [sellerId],
+                  url: `/market/orders/${orderId}`,
+                  data: { type: "market_order_paid", orderId },
+                });
+              }
+
+              if (customerUserId) {
+                const title = "✅ Paiement confirmé";
+                const body = `Espace Marketplace -\nCommande ${orderId}`;
+                await sendSupabaseLightPush(req, {
+                  title,
+                  message: body,
+                  targetUserIds: [String(customerUserId)],
+                  url: `/market/orders/${orderId}`,
+                  data: { type: "market_order_payment_confirmed", orderId },
+                });
+              }
+            } catch {}
           } catch (e) {
             await logEvent({ category: "marketplace", action: "pi.succeeded", status: "error", userId: customerUserId, context: { orderId, error: e?.message || String(e), payment_intent_id: pi.id } });
           }
@@ -6252,7 +6322,8 @@ async function sendSupabaseLightPush(req, { title, message, targetUserIds, url =
 
   try {
     const baseUrl = `${req.protocol}://${req.get("host")}`;
-    const response = await fetch(`${baseUrl}/api/push/send`, {
+    // Unifie l'envoi via le dispatcher multi-canaux (Web Push + FCM + APNs)
+    const response = await fetch(`${baseUrl}/api/notifications/dispatch`, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
@@ -6267,10 +6338,10 @@ async function sendSupabaseLightPush(req, { title, message, targetUserIds, url =
     });
 
     const resp = await response.json().catch(() => null);
-    if (!response.ok) {
-      return { ok: false, error: resp?.error || `push_send_failed_${response.status}` };
+    if (!response.ok || resp?.success !== true) {
+      return { ok: false, error: resp?.error || `dispatch_failed_${response.status}` };
     }
-    return { ok: true, sent: resp?.sent ?? null };
+    return { ok: true, sent: (resp?.sentWeb || 0) + (resp?.native?.sent || 0) + (resp?.ios?.sent || 0) };
   } catch (e) {
     return { ok: false, error: e?.message || "push_send_exception" };
   }
@@ -8163,6 +8234,105 @@ app.post("/notifications/onesignal", (req, res, next) => {
 app.get("/", (req, res) => {
   res.send("✅ OneKamer backend est opérationnel !");
 });
+
+let MARKET_REMINDERS_LOCK = false;
+async function localDispatchNotification({ title, message, targetUserIds, url = "/", data = {} }) {
+  const baseUrl = `http://127.0.0.1:${process.env.PORT || 3000}`;
+  const r = await fetch(`${baseUrl}/api/notifications/dispatch`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ title, message, targetUserIds, url, data }),
+  });
+  const j = await r.json().catch(() => null);
+  if (!r.ok || j?.success !== true) throw new Error(j?.error || "dispatch_failed");
+  return j;
+}
+
+function formatOrderShort(o) {
+  const n = Number(o && o.order_number);
+  if (Number.isFinite(n)) return `n°${String(n).padStart(6, "0")}`;
+  return `#${String(o?.id || "")}`;
+}
+
+async function runMarketplaceRemindersOnce() {
+  if (MARKET_REMINDERS_LOCK) return;
+  MARKET_REMINDERS_LOCK = true;
+  try {
+    const now = Date.now();
+    const twoDaysAgo = new Date(now - 2 * 24 * 60 * 60 * 1000).toISOString();
+    const threeDaysAgo = new Date(now - 3 * 24 * 60 * 60 * 1000).toISOString();
+
+    const { data: orders1 } = await supabase
+      .from("partner_orders")
+      .select("id, customer_user_id, order_number, fulfillment_updated_at")
+      .eq("status", "paid")
+      .eq("fulfillment_status", "delivered")
+      .lte("fulfillment_updated_at", twoDaysAgo)
+      .is("buyer_received_at", null)
+      .limit(200);
+
+    const list1 = Array.isArray(orders1) ? orders1 : [];
+    for (const o of list1) {
+      const uid = o && o.customer_user_id ? String(o.customer_user_id) : null;
+      if (!uid) continue;
+      const link = `/market/orders/${o.id}`;
+      const { data: exist1 } = await supabase
+        .from("notifications")
+        .select("id")
+        .eq("user_id", uid)
+        .eq("type", "market_order_reminder_received")
+        .eq("link", link)
+        .gt("created_at", new Date(now - 30 * 24 * 60 * 60 * 1000).toISOString())
+        .maybeSingle();
+      if (exist1 && exist1.id) continue;
+      const title = "📦 Avez‑vous reçu votre commande ?";
+      const message = `Espace Marketplace -\nConfirmez la réception de ${formatOrderShort(o)}`;
+      await localDispatchNotification({ title, message, targetUserIds: [uid], url: link, data: { type: "market_order_reminder_received", orderId: o.id } });
+      await logEvent({ category: "marketplace", action: "reminder.received", status: "success", userId: uid, context: { orderId: o.id } });
+    }
+
+    const { data: orders2 } = await supabase
+      .from("partner_orders")
+      .select("id, customer_user_id, order_number, buyer_received_at")
+      .eq("status", "paid")
+      .not("buyer_received_at", "is", null)
+      .lte("buyer_received_at", threeDaysAgo)
+      .limit(200);
+
+    const list2 = Array.isArray(orders2) ? orders2 : [];
+    for (const o of list2) {
+      const uid = o && o.customer_user_id ? String(o.customer_user_id) : null;
+      if (!uid) continue;
+      const { data: hasRating } = await supabase
+        .from("marketplace_partner_ratings")
+        .select("id")
+        .eq("order_id", o.id)
+        .maybeSingle();
+      if (hasRating && hasRating.id) continue;
+      const link = `/market/orders/${o.id}`;
+      const { data: exist2 } = await supabase
+        .from("notifications")
+        .select("id")
+        .eq("user_id", uid)
+        .eq("type", "market_order_reminder_review")
+        .eq("link", link)
+        .gt("created_at", new Date(now - 30 * 24 * 60 * 60 * 1000).toISOString())
+        .maybeSingle();
+      if (exist2 && exist2.id) continue;
+      const title = "⭐ Donnez votre avis";
+      const message = `Espace Marketplace -\nNotez votre expérience ${formatOrderShort(o)}`;
+      await localDispatchNotification({ title, message, targetUserIds: [uid], url: link, data: { type: "market_order_reminder_review", orderId: o.id } });
+      await logEvent({ category: "marketplace", action: "reminder.review", status: "success", userId: uid, context: { orderId: o.id } });
+    }
+  } catch (e) {
+    await logEvent({ category: "marketplace", action: "reminders.error", status: "error", context: { error: e?.message || String(e) } });
+  } finally {
+    MARKET_REMINDERS_LOCK = false;
+  }
+}
+
+setTimeout(() => { runMarketplaceRemindersOnce().catch(() => {}); }, 30000);
+cron.schedule("*/10 * * * *", () => { runMarketplaceRemindersOnce().catch(() => {}); });
 
 // ============================================================
 // 7️⃣ Lancement serveur
