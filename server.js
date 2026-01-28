@@ -3536,7 +3536,20 @@ app.get("/api/market/orders/:orderId", async (req, res) => {
     const ordStatus = String(order?.status || '').toLowerCase();
     const normalizedFulfillment = (ordStatus === 'cancelled' || ordStatus === 'canceled') ? 'completed' : (order?.fulfillment_status || null);
 
-    let orderOut = { ...order, fulfillment_status: normalizedFulfillment, partner_display_name: partner?.display_name || null, customer_alias: customerAlias };
+    // Email client depuis profiles (exposé tant que la commande n'est pas anonymisée côté vendeur)
+    let customerEmail = null;
+    try {
+      if (order?.customer_user_id) {
+        const { data: prof } = await supabase
+          .from("profiles")
+          .select("email")
+          .eq("id", order.customer_user_id)
+          .maybeSingle();
+        customerEmail = prof?.email || null;
+      }
+    } catch {}
+
+    let orderOut = { ...order, fulfillment_status: normalizedFulfillment, partner_display_name: partner?.display_name || null, customer_alias: customerAlias, customer_email: customerEmail };
     if (isSeller && String(normalizedFulfillment || '').toLowerCase() === 'completed') {
       orderOut = {
         ...orderOut,
@@ -3548,6 +3561,7 @@ app.get("/api/market/orders/:orderId", async (req, res) => {
         customer_address_postal_code: null,
         customer_address_city: null,
         customer_address_country: null,
+        customer_email: null,
       };
     }
 
@@ -3557,6 +3571,74 @@ app.get("/api/market/orders/:orderId", async (req, res) => {
       conversationId: conv?.id || null,
       role: isBuyer ? "buyer" : "seller",
     });
+  } catch (e) {
+    return res.status(500).json({ error: e?.message || "Erreur interne" });
+  }
+});
+
+// Enregistrer les informations de livraison (acheteur) avant paiement
+app.post("/api/market/orders/:orderId/shipping-info", bodyParser.json(), async (req, res) => {
+  try {
+    const guard = await requireUserJWT(req);
+    if (!guard.ok) return res.status(guard.status).json({ error: guard.error });
+
+    const { orderId } = req.params;
+    if (!orderId) return res.status(400).json({ error: "orderId_requis" });
+
+    const {
+      first_name,
+      last_name,
+      email,
+      phone,
+      address_line1,
+      address_line2,
+      postal_code,
+      city,
+      country,
+    } = req.body || {};
+
+    const { data: order, error: oErr } = await supabase
+      .from("partner_orders")
+      .select("id, customer_user_id, status, delivery_mode")
+      .eq("id", orderId)
+      .maybeSingle();
+    if (oErr) return res.status(500).json({ error: oErr.message || "Erreur lecture commande" });
+    if (!order) return res.status(404).json({ error: "order_not_found" });
+    if (String(order.customer_user_id) !== String(guard.userId)) return res.status(403).json({ error: "forbidden" });
+
+    const ordStatus = String(order.status || '').toLowerCase();
+    if (ordStatus !== 'pending') return res.status(400).json({ error: "order_not_pending" });
+
+    const isPickup = String(order.delivery_mode || '').toLowerCase() === 'pickup';
+    if (!isPickup) {
+      const required = [first_name, last_name, phone, address_line1, postal_code, city, country];
+      if (required.some((v) => !String(v || '').trim())) {
+        return res.status(400).json({ error: "missing_fields" });
+      }
+    }
+
+    const nowIso = new Date().toISOString();
+    const updatePayload = {
+      customer_first_name: (first_name || null) ? String(first_name).trim() : null,
+      customer_last_name: (last_name || null) ? String(last_name).trim() : null,
+      customer_phone: (phone || null) ? String(phone).trim() : null,
+      customer_address_line1: (address_line1 || null) ? String(address_line1).trim() : null,
+      customer_address_line2: (address_line2 || null) ? String(address_line2).trim() : null,
+      customer_address_postal_code: (postal_code || null) ? String(postal_code).trim() : null,
+      customer_address_city: (city || null) ? String(city).trim() : null,
+      customer_address_country: (country || null) ? String(country).trim() : null,
+      customer_country_code: (country || null) ? String(country).trim() : null,
+      updated_at: nowIso,
+    };
+
+    const { error: upErr } = await supabase
+      .from("partner_orders")
+      .update(updatePayload)
+      .eq("id", orderId);
+    if (upErr) return res.status(500).json({ error: upErr.message || "Erreur mise à jour" });
+
+    // Email non persisté côté commande; affichage via profiles
+    return res.json({ ok: true });
   } catch (e) {
     return res.status(500).json({ error: e?.message || "Erreur interne" });
   }
