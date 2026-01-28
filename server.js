@@ -2137,8 +2137,9 @@ app.get("/api/market/partners/:partnerId/orders", async (req, res) => {
     const normalizeFulfillment = (o) => {
       const s = String(o?.status || '').toLowerCase();
       if (s === 'canceled' || s === 'cancelled') return 'completed';
+      const f = String(o?.fulfillment_status || '').toLowerCase();
+      if (f === 'canceled' || f === 'cancelled') return 'completed';
       if (paidStates.includes(s)) {
-        const f = String(o?.fulfillment_status || '').toLowerCase();
         return f || 'sent_to_seller';
       }
       return o?.fulfillment_status || null;
@@ -2233,6 +2234,180 @@ app.post("/api/market/partners/:partnerId/orders/:orderId/mark-received", async 
     if (upErr) return res.status(500).json({ error: upErr.message || "update_failed" });
 
     return res.json({ success: true, fulfillment_status: "preparing" });
+  } catch (e) {
+    return res.status(500).json({ error: e?.message || "Erreur interne" });
+  }
+});
+
+// Refuser une commande (vendeur) au moment d'accepter
+app.post("/api/market/partners/:partnerId/orders/:orderId/refuse", bodyParser.json(), async (req, res) => {
+  try {
+    const { partnerId, orderId } = req.params;
+    const { reason } = req.body || {};
+    if (!partnerId || !orderId) return res.status(400).json({ error: "partnerId et orderId requis" });
+
+    const auth = await requirePartnerOwner({ req, partnerId });
+    if (!auth.ok) return res.status(auth.status).json({ error: auth.error });
+
+    const { data: order, error: oErr } = await supabase
+      .from("partner_orders")
+      .select("id, partner_id, customer_user_id, status, fulfillment_status")
+      .eq("id", orderId)
+      .eq("partner_id", partnerId)
+      .maybeSingle();
+    if (oErr) return res.status(500).json({ error: oErr.message || "Erreur lecture commande" });
+    if (!order) return res.status(404).json({ error: "order_not_found" });
+
+    const s = String(order.status || "").toLowerCase();
+    const f = String(order.fulfillment_status || "").toLowerCase();
+    if (s !== "paid") return res.status(400).json({ error: "order_payment_invalid" });
+    if (f !== "sent_to_seller") return res.status(400).json({ error: "fulfillment_transition_invalid" });
+
+    const now = new Date().toISOString();
+    const { error: upErr } = await supabase
+      .from("partner_orders")
+      .update({ status: "refunded", fulfillment_status: "canceled", fulfillment_updated_at: now, updated_at: now })
+      .eq("id", orderId)
+      .eq("partner_id", partnerId);
+    if (upErr) return res.status(500).json({ error: upErr.message || "Erreur mise à jour" });
+
+    try {
+      let convId = null;
+      const { data: conv } = await supabase
+        .from("marketplace_order_conversations")
+        .select("id")
+        .eq("order_id", orderId)
+        .maybeSingle();
+      if (conv?.id) {
+        convId = conv.id;
+      } else {
+        const { data: inserted } = await supabase
+          .from("marketplace_order_conversations")
+          .insert({ order_id: orderId, buyer_id: order.customer_user_id, seller_id: auth.partner?.owner_user_id || null, created_at: now })
+          .select("id")
+          .maybeSingle();
+        convId = inserted?.id || null;
+      }
+      if (convId) {
+        const text = reason ? `Commande refusée par le vendeur. Motif: ${String(reason).slice(0, 500)}` : "Commande refusée par le vendeur.";
+        await supabase
+          .from("marketplace_order_messages")
+          .insert({ conversation_id: convId, author_id: auth.userId || null, body: text, created_at: now });
+      }
+    } catch {}
+
+    try {
+      await sendSupabaseLightPush(req, {
+        title: "Commande refusée",
+        message: reason ? String(reason).slice(0, 140) : "Le vendeur a refusé votre commande. Un remboursement sera effectué manuellement.",
+        targetUserIds: [String(order.customer_user_id)],
+        data: { type: "market_order_refused", orderId },
+        url: `/market/orders/${orderId}`,
+      });
+    } catch {}
+
+    try {
+      const { data: admins } = await supabase.from("profiles").select("id").eq("is_admin", true);
+      const targets = Array.isArray(admins) ? admins.map((a) => a.id).filter(Boolean) : [];
+      if (targets.length > 0) {
+        await sendSupabaseLightPush(req, {
+          title: "Remboursement manuel requis",
+          message: `Commande ${orderId} refusée par le vendeur.`,
+          targetUserIds: targets,
+          data: { type: "market_admin_manual_refund", orderId, partnerId, reason: reason || null },
+          url: "/admin/payments",
+        });
+      }
+    } catch {}
+
+    return res.json({ ok: true });
+  } catch (e) {
+    return res.status(500).json({ error: e?.message || "Erreur interne" });
+  }
+});
+
+// Annuler une commande (vendeur) tant que non expédiée
+app.post("/api/market/partners/:partnerId/orders/:orderId/cancel", bodyParser.json(), async (req, res) => {
+  try {
+    const { partnerId, orderId } = req.params;
+    const { reason } = req.body || {};
+    if (!partnerId || !orderId) return res.status(400).json({ error: "partnerId et orderId requis" });
+
+    const auth = await requirePartnerOwner({ req, partnerId });
+    if (!auth.ok) return res.status(auth.status).json({ error: auth.error });
+
+    const { data: order, error: oErr } = await supabase
+      .from("partner_orders")
+      .select("id, partner_id, customer_user_id, status, fulfillment_status")
+      .eq("id", orderId)
+      .eq("partner_id", partnerId)
+      .maybeSingle();
+    if (oErr) return res.status(500).json({ error: oErr.message || "Erreur lecture commande" });
+    if (!order) return res.status(404).json({ error: "order_not_found" });
+
+    const s = String(order.status || "").toLowerCase();
+    const f = String(order.fulfillment_status || "").toLowerCase();
+    if (s !== "paid") return res.status(400).json({ error: "order_payment_invalid" });
+    if (["shipping", "delivered", "completed"].includes(f)) return res.status(400).json({ error: "fulfillment_transition_invalid" });
+
+    const now = new Date().toISOString();
+    const { error: upErr } = await supabase
+      .from("partner_orders")
+      .update({ status: "refunded", fulfillment_status: "canceled", fulfillment_updated_at: now, updated_at: now })
+      .eq("id", orderId)
+      .eq("partner_id", partnerId);
+    if (upErr) return res.status(500).json({ error: upErr.message || "Erreur mise à jour" });
+
+    try {
+      let convId = null;
+      const { data: conv } = await supabase
+        .from("marketplace_order_conversations")
+        .select("id")
+        .eq("order_id", orderId)
+        .maybeSingle();
+      if (conv?.id) {
+        convId = conv.id;
+      } else {
+        const { data: inserted } = await supabase
+          .from("marketplace_order_conversations")
+          .insert({ order_id: orderId, buyer_id: order.customer_user_id, seller_id: auth.partner?.owner_user_id || null, created_at: now })
+          .select("id")
+          .maybeSingle();
+        convId = inserted?.id || null;
+      }
+      if (convId) {
+        const text = reason ? `Commande annulée par le vendeur. Motif: ${String(reason).slice(0, 500)}` : "Commande annulée par le vendeur.";
+        await supabase
+          .from("marketplace_order_messages")
+          .insert({ conversation_id: convId, author_id: auth.userId || null, body: text, created_at: now });
+      }
+    } catch {}
+
+    try {
+      await sendSupabaseLightPush(req, {
+        title: "Commande annulée",
+        message: reason ? String(reason).slice(0, 140) : "Le vendeur a annulé votre commande. Un remboursement sera effectué manuellement.",
+        targetUserIds: [String(order.customer_user_id)],
+        data: { type: "market_order_canceled", orderId },
+        url: `/market/orders/${orderId}`,
+      });
+    } catch {}
+
+    try {
+      const { data: admins } = await supabase.from("profiles").select("id").eq("is_admin", true);
+      const targets = Array.isArray(admins) ? admins.map((a) => a.id).filter(Boolean) : [];
+      if (targets.length > 0) {
+        await sendSupabaseLightPush(req, {
+          title: "Remboursement manuel requis",
+          message: `Commande ${orderId} annulée par le vendeur.`,
+          targetUserIds: targets,
+          data: { type: "market_admin_manual_refund", orderId, partnerId, reason: reason || null },
+          url: "/admin/payments",
+        });
+      }
+    } catch {}
+
+    return res.json({ ok: true });
   } catch (e) {
     return res.status(500).json({ error: e?.message || "Erreur interne" });
   }
