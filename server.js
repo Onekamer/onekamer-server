@@ -146,7 +146,7 @@ app.post("/api/terms/app/accept", async (req, res) => {
     const now = new Date().toISOString();
     const { error } = await supabase
       .from("profiles")
-      .update({ has_accepted_charts: true, chart_terms_version: CURRENT_APP_TERMS_VERSION, updated_at: now })
+      .update({ has_accepted_charte: true, chart_terms_version: CURRENT_APP_TERMS_VERSION, updated_at: now })
       .eq("id", guard.userId);
     if (error) return res.status(500).json({ error: error.message || "profile_update_failed" });
     return res.json({ ok: true, version: CURRENT_APP_TERMS_VERSION });
