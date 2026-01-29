@@ -66,6 +66,11 @@ app.options("*", cors(corsOptions)); // ✅ Preflight
 
 console.log("✅ CORS actif pour :", allowedOrigins.join(", "));
 
+// Versions courantes des chartes
+const CURRENT_APP_TERMS_VERSION = "2026-01-29";
+const CURRENT_VENDOR_TERMS_VERSION = "2026-01-29";
+const CURRENT_BUYER_TERMS_VERSION = "2026-01-29";
+
 // 1) Stripe webhook RAW AVANT tout parser JSON
 app.post("/webhook", express.raw({ type: "application/json" }), stripeWebhookHandler);
 
@@ -81,6 +86,73 @@ app.get("/api/stripe/config", (_req, res) => {
   const pk = process.env.STRIPE_PUBLISHABLE_KEY;
   if (!pk) return res.status(500).json({ error: "publishable_key_missing" });
   return res.json({ publishableKey: pk });
+});
+
+// Configuration chartes (versions courantes)
+app.get("/api/terms/config", async (_req, res) => {
+  try {
+    return res.json({
+      app: { version: CURRENT_APP_TERMS_VERSION },
+      marketplace: {
+        vendor: { version: CURRENT_VENDOR_TERMS_VERSION },
+        buyer: { version: CURRENT_BUYER_TERMS_VERSION },
+      },
+    });
+  } catch (e) {
+    return res.status(500).json({ error: e?.message || "Erreur interne" });
+  }
+});
+
+// Accepter la charte acheteur pour une commande (avant paiement)
+app.post("/api/market/orders/:orderId/terms/buyer", async (req, res) => {
+  try {
+    const guard = await requireUserJWT(req);
+    if (!guard.ok) return res.status(guard.status).json({ error: guard.error });
+
+    const { orderId } = req.params;
+    if (!orderId) return res.status(400).json({ error: "orderId requis" });
+
+    const { data: order, error: oErr } = await supabase
+      .from("partner_orders")
+      .select("id, customer_user_id, status, has_accepted_marketplace_terms_buyers")
+      .eq("id", orderId)
+      .maybeSingle();
+    if (oErr) return res.status(500).json({ error: oErr.message || "Erreur lecture commande" });
+    if (!order) return res.status(404).json({ error: "order_not_found" });
+    if (String(order.customer_user_id) !== String(guard.userId)) return res.status(403).json({ error: "forbidden" });
+
+    const s = String(order.status || '').toLowerCase();
+    if (s !== 'pending') return res.status(400).json({ error: "order_not_pending" });
+    if (order.has_accepted_marketplace_terms_buyers === true) return res.json({ ok: true, already: true });
+
+    const now = new Date().toISOString();
+    const { error: upErr } = await supabase
+      .from("partner_orders")
+      .update({ has_accepted_marketplace_terms_buyers: true, updated_at: now })
+      .eq("id", orderId);
+    if (upErr) return res.status(500).json({ error: upErr.message || "order_update_failed" });
+    return res.json({ ok: true });
+  } catch (e) {
+    return res.status(500).json({ error: e?.message || "Erreur interne" });
+  }
+});
+
+// Accepter la charte générale de l'app
+app.post("/api/terms/app/accept", async (req, res) => {
+  try {
+    const guard = await requireUserJWT(req);
+    if (!guard.ok) return res.status(guard.status).json({ error: guard.error });
+
+    const now = new Date().toISOString();
+    const { error } = await supabase
+      .from("profiles")
+      .update({ has_accepted_charts: true, chart_terms_version: CURRENT_APP_TERMS_VERSION, updated_at: now })
+      .eq("id", guard.userId);
+    if (error) return res.status(500).json({ error: error.message || "profile_update_failed" });
+    return res.json({ ok: true, version: CURRENT_APP_TERMS_VERSION });
+  } catch (e) {
+    return res.status(500).json({ error: e?.message || "Erreur interne" });
+  }
 });
 
 // Top donateurs OK COINS (lecture publique via service-role)
@@ -2000,7 +2072,7 @@ async function requirePartnerOwner({ req, partnerId }) {
 
   const { data: partner, error: pErr } = await supabase
     .from("partners_market")
-    .select("id, owner_user_id, stripe_connect_account_id, payout_status")
+    .select("id, owner_user_id, stripe_connect_account_id, payout_status, has_accepted_marketplace_terms_vendors, marketplace_terms_vendors_version, accepted_marketplace_terms_vendors_at")
     .eq("id", partnerId)
     .maybeSingle();
 
@@ -2008,6 +2080,12 @@ async function requirePartnerOwner({ req, partnerId }) {
   if (!partner) return { ok: false, status: 404, error: "partner_not_found" };
   if (partner.owner_user_id !== guard.userId) return { ok: false, status: 403, error: "forbidden" };
   return { ok: true, userId: guard.userId, partner };
+}
+
+function isVendorTermsCompliant(partner) {
+  const accepted = partner?.has_accepted_marketplace_terms_vendors === true;
+  const version = String(partner?.marketplace_terms_vendors_version || "");
+  return accepted && version === CURRENT_VENDOR_TERMS_VERSION;
 }
 
 async function requireVipOrAdminUser({ req }) {
@@ -2079,13 +2157,40 @@ app.get("/api/market/partners/me", async (req, res) => {
     const { data: partner, error } = await supabase
       .from("partners_market")
       .select(
-        "id, owner_user_id, display_name, description, category, status, payout_status, stripe_connect_account_id, is_open, logo_url, phone, whatsapp, address, hours, created_at, updated_at"
+        "id, owner_user_id, display_name, description, category, status, payout_status, stripe_connect_account_id, is_open, logo_url, phone, whatsapp, address, hours, created_at, updated_at, has_accepted_marketplace_terms_vendors, marketplace_terms_vendors_version, accepted_marketplace_terms_vendors_at"
       )
       .eq("owner_user_id", guard.userId)
       .maybeSingle();
 
     if (error) return res.status(500).json({ error: error.message || "Erreur lecture boutique" });
-    return res.json({ partner: partner || null });
+    const partnerOut = partner ? { ...partner, vendor_terms_compliant: isVendorTermsCompliant(partner) } : null;
+    return res.json({ partner: partnerOut });
+  } catch (e) {
+    return res.status(500).json({ error: e?.message || "Erreur interne" });
+  }
+});
+
+// Accepter la charte Marketplace vendeur
+app.post("/api/market/partners/:partnerId/terms/accept", async (req, res) => {
+  try {
+    const { partnerId } = req.params;
+    if (!partnerId) return res.status(400).json({ error: "partnerId requis" });
+
+    const auth = await requirePartnerOwner({ req, partnerId });
+    if (!auth.ok) return res.status(auth.status).json({ error: auth.error });
+
+    const now = new Date().toISOString();
+    const { error } = await supabase
+      .from("partners_market")
+      .update({
+        has_accepted_marketplace_terms_vendors: true,
+        marketplace_terms_vendors_version: CURRENT_VENDOR_TERMS_VERSION,
+        accepted_marketplace_terms_vendors_at: now,
+        updated_at: now,
+      })
+      .eq("id", partnerId);
+    if (error) return res.status(500).json({ error: error.message || "partner_update_failed" });
+    return res.json({ ok: true, version: CURRENT_VENDOR_TERMS_VERSION });
   } catch (e) {
     return res.status(500).json({ error: e?.message || "Erreur interne" });
   }
@@ -2207,6 +2312,7 @@ app.post("/api/market/partners/:partnerId/orders/:orderId/mark-received", async 
 
     const auth = await requirePartnerOwner({ req, partnerId });
     if (!auth.ok) return res.status(auth.status).json({ error: auth.error });
+    if (!isVendorTermsCompliant(auth.partner)) return res.status(403).json({ error: "vendor_terms_required" });
 
     const { data: order, error: oErr } = await supabase
       .from("partner_orders")
@@ -2248,6 +2354,7 @@ app.post("/api/market/partners/:partnerId/orders/:orderId/refuse", bodyParser.js
 
     const auth = await requirePartnerOwner({ req, partnerId });
     if (!auth.ok) return res.status(auth.status).json({ error: auth.error });
+    if (!isVendorTermsCompliant(auth.partner)) return res.status(403).json({ error: "vendor_terms_required" });
 
     const { data: order, error: oErr } = await supabase
       .from("partner_orders")
@@ -2335,6 +2442,7 @@ app.post("/api/market/partners/:partnerId/orders/:orderId/cancel", bodyParser.js
 
     const auth = await requirePartnerOwner({ req, partnerId });
     if (!auth.ok) return res.status(auth.status).json({ error: auth.error });
+    if (!isVendorTermsCompliant(auth.partner)) return res.status(403).json({ error: "vendor_terms_required" });
 
     const { data: order, error: oErr } = await supabase
       .from("partner_orders")
@@ -3315,7 +3423,7 @@ app.post("/api/market/orders/:orderId/checkout", bodyParser.json(), async (req, 
 
     const { data: order, error: oErr } = await supabase
       .from("partner_orders")
-      .select("id, partner_id, customer_user_id, status, charge_currency, charge_amount_total, platform_fee_amount")
+      .select("id, partner_id, customer_user_id, status, charge_currency, charge_amount_total, platform_fee_amount, has_accepted_marketplace_terms_buyers")
       .eq("id", orderId)
       .maybeSingle();
     if (oErr) return res.status(500).json({ error: oErr.message || "Erreur lecture commande" });
@@ -3323,6 +3431,9 @@ app.post("/api/market/orders/:orderId/checkout", bodyParser.json(), async (req, 
     if (order.customer_user_id !== guard.userId) return res.status(403).json({ error: "forbidden" });
     if (String(order.status || "").toLowerCase() !== "pending") {
       return res.status(400).json({ error: "order_status_invalid" });
+    }
+    if (order.has_accepted_marketplace_terms_buyers !== true) {
+      return res.status(400).json({ error: "buyer_terms_required" });
     }
 
     const { data: partner, error: pErr } = await supabase
@@ -3413,7 +3524,7 @@ app.post("/api/market/orders/:orderId/intent", bodyParser.json(), async (req, re
 
     const { data: order, error: oErr } = await supabase
       .from("partner_orders")
-      .select("id, partner_id, customer_user_id, status, charge_currency, charge_amount_total, platform_fee_amount")
+      .select("id, partner_id, customer_user_id, status, charge_currency, charge_amount_total, platform_fee_amount, has_accepted_marketplace_terms_buyers")
       .eq("id", orderId)
       .maybeSingle();
     if (oErr) return res.status(500).json({ error: oErr.message || "Erreur lecture commande" });
@@ -3843,11 +3954,12 @@ app.patch("/api/market/orders/:orderId/fulfillment", bodyParser.json(), async (r
 
     const { data: partner, error: pErr } = await supabase
       .from("partners_market")
-      .select("id, owner_user_id")
+      .select("id, owner_user_id, has_accepted_marketplace_terms_vendors, marketplace_terms_vendors_version")
       .eq("id", order.partner_id)
       .maybeSingle();
     if (pErr) return res.status(500).json({ error: pErr.message || "Erreur lecture partenaire" });
     if (!partner || String(partner.owner_user_id) !== String(guard.userId)) return res.status(403).json({ error: "forbidden" });
+    if (!isVendorTermsCompliant(partner)) return res.status(403).json({ error: "vendor_terms_required" });
 
     const nowIso = new Date().toISOString();
     const updatePayload = { fulfillment_status: next, fulfillment_updated_at: nowIso, updated_at: nowIso };
