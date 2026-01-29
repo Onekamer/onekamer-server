@@ -3435,6 +3435,9 @@ app.post("/api/market/orders/:orderId/checkout", bodyParser.json(), async (req, 
     if (order.has_accepted_marketplace_terms_buyers !== true) {
       return res.status(400).json({ error: "buyer_terms_required" });
     }
+    if (order.has_accepted_marketplace_terms_buyers !== true) {
+      return res.status(400).json({ error: "buyer_terms_required" });
+    }
 
     const { data: partner, error: pErr } = await supabase
       .from("partners_market")
@@ -3532,6 +3535,9 @@ app.post("/api/market/orders/:orderId/intent", bodyParser.json(), async (req, re
     if (order.customer_user_id !== guard.userId) return res.status(403).json({ error: "forbidden" });
     if (String(order.status || "").toLowerCase() !== "pending") {
       return res.status(400).json({ error: "order_status_invalid" });
+    }
+    if (order.has_accepted_marketplace_terms_buyers !== true) {
+      return res.status(400).json({ error: "buyer_terms_required" });
     }
 
     const { data: partner, error: pErr } = await supabase
