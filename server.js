@@ -853,16 +853,17 @@ app.patch("/api/admin/market/orders/:orderId/status", bodyParser.json(), async (
     } catch {}
 
     const buyerId = order?.customer_user_id ? String(order.customer_user_id) : null;
-    const titleMap = { refunded: "Commande remboursée", disputed: "Litige commande" };
-    const msg = reason ? `${st} - ${reason}` : `Statut: ${st}`;
+    const titleMap = { refunded: "a été remboursée", disputed: "a été mise en litige" };
+    const code = await getOrderDisplayCode(orderId);
+    const msg = `Commande n°${code} ${titleMap[st] || ''}`.trim() + `\nCliquez pour voir le statut de la commande.`;
 
     try {
       if (buyerId) {
         await sendSupabaseLightPush(req, {
-          title: titleMap[st] || "Mise à jour commande",
+          title: "Marketplace",
           message: msg,
           targetUserIds: [buyerId],
-          data: { type: "market_order_admin_status", orderId, status: st },
+          data: { type: "market_order_admin_status", orderId, status: st, orderNumber: code },
           url: `/market/orders/${orderId}`,
         });
       }
@@ -871,10 +872,10 @@ app.patch("/api/admin/market/orders/:orderId/status", bodyParser.json(), async (
     try {
       if (sellerId) {
         await sendSupabaseLightPush(req, {
-          title: titleMap[st] || "Mise à jour commande",
+          title: "Marketplace",
           message: msg,
           targetUserIds: [sellerId],
-          data: { type: "market_order_admin_status", orderId, status: st },
+          data: { type: "market_order_admin_status", orderId, status: st, orderNumber: code },
           url: `/market/orders/${orderId}`,
         });
       }
@@ -925,8 +926,9 @@ app.patch("/api/admin/market/orders/:orderId/fulfillment", bodyParser.json(), as
     } catch {}
     const buyerId = order?.customer_user_id ? String(order.customer_user_id) : null;
 
-    const title = "Commande terminée (admin)";
-    const message = reason ? `Terminé par l'admin - ${reason}` : "Terminé par l'admin";
+    const code = await getOrderDisplayCode(orderId);
+    const title = "Marketplace";
+    const message = `Commande n°${code} a été terminée par l’admin\nCliquez pour voir le statut de la commande.`;
     try {
       if (buyerId) {
         await sendSupabaseLightPush(req, {
@@ -934,7 +936,7 @@ app.patch("/api/admin/market/orders/:orderId/fulfillment", bodyParser.json(), as
           message,
           targetUserIds: [buyerId],
           url: `/market/orders/${orderId}`,
-          data: { type: "market_order_admin_fulfillment", orderId, fulfillment_status: "completed" },
+          data: { type: "market_order_admin_fulfillment", orderId, fulfillment_status: "completed", orderNumber: code },
         });
       }
     } catch {}
@@ -946,7 +948,7 @@ app.patch("/api/admin/market/orders/:orderId/fulfillment", bodyParser.json(), as
           message,
           targetUserIds: [sellerId],
           url: `/market/orders/${orderId}`,
-          data: { type: "market_order_admin_fulfillment", orderId, fulfillment_status: "completed" },
+          data: { type: "market_order_admin_fulfillment", orderId, fulfillment_status: "completed", orderNumber: code },
         });
       }
     } catch {}
@@ -1000,8 +1002,9 @@ app.post("/api/admin/market/orders/:orderId/refund", bodyParser.json(), async (r
     const amountMinor = Number.isFinite(parseInt(amountRaw, 10)) ? parseInt(amountRaw, 10) : null;
     const cur = String(order.charge_currency || "").toUpperCase();
     const amtStr = amountMinor != null ? `${(amountMinor / 100).toFixed(2)} ${cur || ""}`.trim() : null;
-    const title = "Remboursement confirmé";
-    const message = amtStr ? `Montant remboursé: ${amtStr}` : "Commande marquée remboursée";
+    const code = await getOrderDisplayCode(orderId);
+    const title = "Marketplace";
+    const message = `Commande n°${code} a été remboursée\nCliquez pour voir le statut de la commande.`;
 
     try {
       if (buyerId) {
@@ -1010,7 +1013,7 @@ app.post("/api/admin/market/orders/:orderId/refund", bodyParser.json(), async (r
           message,
           targetUserIds: [buyerId],
           url: `/market/orders/${orderId}`,
-          data: { type: "market_order_admin_refund", orderId, amount_minor: amountMinor },
+          data: { type: "market_order_admin_refund", orderId, amount_minor: amountMinor, orderNumber: code },
         });
       }
     } catch {}
@@ -1022,7 +1025,7 @@ app.post("/api/admin/market/orders/:orderId/refund", bodyParser.json(), async (r
           message,
           targetUserIds: [sellerId],
           url: `/market/orders/${orderId}`,
-          data: { type: "market_order_admin_refund", orderId, amount_minor: amountMinor },
+          data: { type: "market_order_admin_refund", orderId, amount_minor: amountMinor, orderNumber: code },
         });
       }
     } catch {}
@@ -2396,7 +2399,7 @@ app.post("/api/market/partners/:partnerId/orders/:orderId/refuse", bodyParser.js
         convId = inserted?.id || null;
       }
       if (convId) {
-        const text = reason ? `Commande refusée par le vendeur. Motif: ${String(reason).slice(0, 500)}` : "Commande refusée par le vendeur.";
+        const text = reason ? `Commande annulée par le vendeur. Motif: ${String(reason).slice(0, 500)}` : "Commande annulée par le vendeur.";
         await supabase
           .from("marketplace_order_messages")
           .insert({ conversation_id: convId, author_id: auth.userId || null, body: text, created_at: now });
@@ -2404,11 +2407,12 @@ app.post("/api/market/partners/:partnerId/orders/:orderId/refuse", bodyParser.js
     } catch {}
 
     try {
+      const code = await getOrderDisplayCode(orderId);
       await sendSupabaseLightPush(req, {
-        title: "Commande refusée",
-        message: reason ? String(reason).slice(0, 140) : "Le vendeur a refusé votre commande. Un remboursement sera effectué manuellement.",
+        title: "Marketplace",
+        message: `Commande n°${code}\nA été annulée par le vendeur. Un remboursement sera effectué dans les 48h.`,
         targetUserIds: [String(order.customer_user_id)],
-        data: { type: "market_order_refused", orderId },
+        data: { type: "market_order_canceled", orderId, orderNumber: code },
         url: `/market/orders/${orderId}`,
       });
     } catch {}
@@ -2417,11 +2421,12 @@ app.post("/api/market/partners/:partnerId/orders/:orderId/refuse", bodyParser.js
       const { data: admins } = await supabase.from("profiles").select("id").eq("is_admin", true);
       const targets = Array.isArray(admins) ? admins.map((a) => a.id).filter(Boolean) : [];
       if (targets.length > 0) {
+        const code = await getOrderDisplayCode(orderId);
         await sendSupabaseLightPush(req, {
-          title: "Remboursement manuel requis",
-          message: `Commande ${orderId} refusée par le vendeur.`,
+          title: "Marketplace",
+          message: `Remboursement manuel requis. Commande n°${code} annulée par le vendeur.`,
           targetUserIds: targets,
-          data: { type: "market_admin_manual_refund", orderId, partnerId, reason: reason || null },
+          data: { type: "market_admin_manual_refund", orderId, partnerId, reason: reason || null, orderNumber: code },
           url: "/admin/payments",
         });
       }
@@ -2492,11 +2497,12 @@ app.post("/api/market/partners/:partnerId/orders/:orderId/cancel", bodyParser.js
     } catch {}
 
     try {
+      const code = await getOrderDisplayCode(orderId);
       await sendSupabaseLightPush(req, {
-        title: "Commande annulée",
-        message: reason ? String(reason).slice(0, 140) : "Le vendeur a annulé votre commande. Un remboursement sera effectué manuellement.",
+        title: "Marketplace",
+        message: `Commande n°${code}\nA été annulée par le vendeur. Un remboursement sera effectué dans les 48h.`,
         targetUserIds: [String(order.customer_user_id)],
-        data: { type: "market_order_canceled", orderId },
+        data: { type: "market_order_canceled", orderId, orderNumber: code },
         url: `/market/orders/${orderId}`,
       });
     } catch {}
@@ -2505,11 +2511,12 @@ app.post("/api/market/partners/:partnerId/orders/:orderId/cancel", bodyParser.js
       const { data: admins } = await supabase.from("profiles").select("id").eq("is_admin", true);
       const targets = Array.isArray(admins) ? admins.map((a) => a.id).filter(Boolean) : [];
       if (targets.length > 0) {
+        const code = await getOrderDisplayCode(orderId);
         await sendSupabaseLightPush(req, {
-          title: "Remboursement manuel requis",
-          message: `Commande ${orderId} annulée par le vendeur.`,
+          title: "Marketplace",
+          message: `Remboursement manuel requis. Commande n°${code} annulée par le vendeur.`,
           targetUserIds: targets,
-          data: { type: "market_admin_manual_refund", orderId, partnerId, reason: reason || null },
+          data: { type: "market_admin_manual_refund", orderId, partnerId, reason: reason || null, orderNumber: code },
           url: "/admin/payments",
         });
       }
@@ -3670,11 +3677,22 @@ app.post("/api/market/partners/:partnerId/report", bodyParser.json(), async (req
         .eq("is_admin", true);
       if (!error && Array.isArray(admins) && admins.length > 0) {
         const targetUserIds = admins.map((a) => a.id).filter(Boolean);
+        let partnerName = null;
+        try {
+          const { data: p } = await supabase
+            .from("partners_market")
+            .select("display_name")
+            .eq("id", partnerId)
+            .maybeSingle();
+          partnerName = p?.display_name || null;
+        } catch {}
+        const l2 = `Un utilisateur a signalé la boutique ${partnerName || partnerId}`;
+        const l3 = normalizedReason ? normalizedReason : "";
         await sendSupabaseLightPush(req, {
-          title: "Nouveau signalement boutique",
-          message: `Un utilisateur a signalé la boutique ${partnerId}`,
+          title: "Marketplace",
+          message: `${l2}${l3 ? `\n${l3}` : ''}`,
           targetUserIds,
-          data: { type: "market_shop_report", partnerId },
+          data: { type: "market_shop_report", partnerId, partnerName: partnerName || null, reason: normalizedReason || null },
           url: "/admin/reports",
         });
       }
@@ -4026,11 +4044,18 @@ app.patch("/api/market/orders/:orderId/fulfillment", bodyParser.json(), async (r
     }
 
     try {
+      const code = await getOrderDisplayCode(orderId);
+      const map = {
+        preparing: `Commande n°${code} est en cours de préparation`,
+        shipping: `Commande n°${code} a été envoyée`,
+        delivered: `Commande n°${code} a été marquée comme livrée`,
+      };
+      const l2 = map[next] || `Commande n°${code}`;
       await sendSupabaseLightPush(req, {
-        title: "Mise à jour commande",
-        message: `Statut: ${next}`,
+        title: "Marketplace",
+        message: `${l2}\nCliquez pour voir le statut de la commande.`,
         targetUserIds: [String(order.customer_user_id)],
-        data: { type: "market_order_fulfillment_update", orderId },
+        data: { type: "market_order_fulfillment_update", orderId, orderNumber: code, status: next },
         url: `/market/orders/${orderId}`,
       });
     } catch {}
@@ -4081,11 +4106,12 @@ app.post("/api/market/orders/:orderId/confirm-received", async (req, res) => {
 
     if (sellerId) {
       try {
+        const code = await getOrderDisplayCode(orderId);
         await sendSupabaseLightPush(req, {
-          title: "Commande reçue",
-          message: "L'acheteur a confirmé la réception.",
+          title: "Marketplace",
+          message: `Commande n°${code} réceptionnée\nL’acheteur a confirmé la réception de la commande.`,
           targetUserIds: [sellerId],
-          data: { type: "market_order_received_confirmed", orderId },
+          data: { type: "market_order_received_confirmed", orderId, orderNumber: code },
           url: `/market/orders/${orderId}`,
         });
       } catch {}
@@ -4238,11 +4264,14 @@ app.post("/api/market/orders/:orderId/messages", bodyParser.json(), async (req, 
     try {
       const recipientId = isBuyer ? sellerId : String(order.customer_user_id);
       if (recipientId) {
+        const code = await getOrderDisplayCode(orderId);
+        const actor = isBuyer ? "L’acheteur" : "Le vendeur";
+        const prev = marketMessagePreview(safeText);
         await sendSupabaseLightPush(req, {
-          title: "Nouveau message commande",
-          message: safeText,
+          title: "Marketplace",
+          message: `Commande n°${code}\n${actor} : ${prev}`,
           targetUserIds: [recipientId],
-          data: { type: "market_order_message", orderId },
+          data: { type: "market_order_message", orderId, orderNumber: code, role: isBuyer ? 'buyer' : 'seller', preview: prev },
           url: `/market/orders/${orderId}`,
         });
       }
@@ -4310,12 +4339,12 @@ app.post("/api/market/orders/:orderId/rating", bodyParser.json(), async (req, re
         .maybeSingle();
       const sellerId = partner?.owner_user_id ? String(partner.owner_user_id) : null;
       if (sellerId) {
-        const snippet = text ? (text.length > 80 ? text.slice(0, 77) + '…' : text) : `Note ${r}★`;
+        const code = await getOrderDisplayCode(orderId);
         await sendSupabaseLightPush(req, {
-          title: "Nouvel avis",
-          message: snippet,
+          title: "Marketplace",
+          message: `Commande n°${code}\nL’acheteur a laissé un avis. Cliquez pour le voir.`,
           targetUserIds: [sellerId],
-          data: { type: "market_partner_new_rating", orderId },
+          data: { type: "market_partner_new_rating", orderId, orderNumber: code },
           url: `/market/orders/${orderId}`,
         });
       }
@@ -5544,26 +5573,24 @@ async function stripeWebhookHandler(req, res) {
               } catch {}
 
               if (sellerId) {
-                const title = "🛒 Nouvelle commande";
-                const body = `Espace Marketplace -\nCommande ${orderId}${buyerName ? ` par ${buyerName}` : ""}`;
+                const code = await getOrderDisplayCode(orderId);
                 await sendSupabaseLightPush(req, {
-                  title,
-                  message: body,
+                  title: "Marketplace",
+                  message: `Nouvelle commande\nCliquez pour l’accepter.`,
                   targetUserIds: [sellerId],
                   url: `/market/orders/${orderId}`,
-                  data: { type: "market_order_paid", orderId },
+                  data: { type: "market_order_paid", orderId, orderNumber: code },
                 });
               }
 
               if (customerUserId) {
-                const title = "✅ Paiement confirmé";
-                const body = `Espace Marketplace -\nCommande ${orderId}`;
+                const code = await getOrderDisplayCode(orderId);
                 await sendSupabaseLightPush(req, {
-                  title,
-                  message: body,
+                  title: "Marketplace",
+                  message: `Commande n°${code} confirmée\nLa boutique a bien reçu votre commande.`,
                   targetUserIds: [String(customerUserId)],
                   url: `/market/orders/${orderId}`,
-                  data: { type: "market_order_payment_confirmed", orderId },
+                  data: { type: "market_order_payment_confirmed", orderId, orderNumber: code },
                 });
               }
             } catch {}
@@ -8687,20 +8714,81 @@ function formatOrderShort(o) {
   return `#${String(o?.id || "")}`;
 }
 
+// Canonical order code formatting aligned with Front formatOrderCode
+function normalizeShopPrefix(name) {
+  try {
+    const raw = String(name || "").normalize('NFD').replace(/[\u0300-\u036f]/g, '').replace(/[^A-Za-z]/g, '').toUpperCase();
+    return (raw.slice(0, 3) || 'OK');
+  } catch (_) {
+    return 'OK';
+  }
+}
+
+function formatOrderCodeCanonical({ shopName, createdAt, orderNumber }) {
+  const prefix = normalizeShopPrefix(shopName);
+  const d = createdAt ? new Date(createdAt) : new Date();
+  const year = Number.isNaN(d.getTime()) ? new Date().getFullYear() : d.getFullYear();
+  const num = String(Number(orderNumber || 0)).padStart(6, '0');
+  return `${prefix}-${year}-${num}`;
+}
+
+async function getOrderDisplayCode(orderId) {
+  try {
+    const { data: o } = await supabase
+      .from("partner_orders")
+      .select("id, order_number, created_at, partner_id")
+      .eq("id", orderId)
+      .maybeSingle();
+    if (!o) return String(orderId);
+    let shopName = null;
+    if (o.partner_id) {
+      try {
+        const { data: p } = await supabase
+          .from("partners_market")
+          .select("display_name")
+          .eq("id", o.partner_id)
+          .maybeSingle();
+        shopName = p?.display_name || null;
+      } catch {}
+    }
+    const code = formatOrderCodeCanonical({ shopName, createdAt: o.created_at, orderNumber: o.order_number });
+    if (code) return code;
+    const n = Number(o.order_number);
+    if (Number.isFinite(n)) return String(n).padStart(6, '0');
+    return String(orderId);
+  } catch {
+    return String(orderId);
+  }
+}
+
+function marketMessagePreview(raw) {
+  const text = String(raw || '').trim();
+  if (!text) return '';
+  const hasUrl = /https?:\/\/\S+/i.test(text);
+  if (/(https?:\/\/\S+\.(png|jpg|jpeg|gif|webp|avif))(\?|$)/i.test(text)) return 'Message image';
+  if (/(https?:\/\/\S+\.(mp4|webm|ogg|mov))(\?|$)/i.test(text)) return 'Message vidéo';
+  if (/(https?:\/\/\S+\.(webm|ogg|m4a|mp3))(\?|$)/i.test(text)) return 'Message audio';
+  if (hasUrl) return 'Lien';
+  let t = text.length > 80 ? text.slice(0, 80) : text;
+  if (text.length > 80 && !/…|\.\.\.$/.test(t)) t = `${t}…`;
+  return t;
+}
+
 async function runMarketplaceRemindersOnce() {
   if (MARKET_REMINDERS_LOCK) return;
   MARKET_REMINDERS_LOCK = true;
   try {
     const now = Date.now();
+    const oneDayAgo = new Date(now - 1 * 24 * 60 * 60 * 1000).toISOString();
     const twoDaysAgo = new Date(now - 2 * 24 * 60 * 60 * 1000).toISOString();
-    const threeDaysAgo = new Date(now - 3 * 24 * 60 * 60 * 1000).toISOString();
+    const fiveDaysAgo = new Date(now - 5 * 24 * 60 * 60 * 1000).toISOString();
 
     const { data: orders1 } = await supabase
       .from("partner_orders")
       .select("id, customer_user_id, order_number, fulfillment_updated_at")
       .eq("status", "paid")
       .eq("fulfillment_status", "delivered")
-      .lte("fulfillment_updated_at", twoDaysAgo)
+      .lte("fulfillment_updated_at", oneDayAgo)
       .is("buyer_received_at", null)
       .limit(200);
 
@@ -8713,14 +8801,15 @@ async function runMarketplaceRemindersOnce() {
         .from("notifications")
         .select("id")
         .eq("user_id", uid)
-        .eq("type", "market_order_reminder_received")
+        .eq("type", "market_order_receive_reminder")
         .eq("link", link)
         .gt("created_at", new Date(now - 30 * 24 * 60 * 60 * 1000).toISOString())
         .maybeSingle();
       if (exist1 && exist1.id) continue;
-      const title = "📦 Avez‑vous reçu votre commande ?";
-      const message = `Espace Marketplace -\nConfirmez la réception de ${formatOrderShort(o)}`;
-      await localDispatchNotification({ title, message, targetUserIds: [uid], url: link, data: { type: "market_order_reminder_received", orderId: o.id } });
+      const code = await getOrderDisplayCode(o.id);
+      const title = "Marketplace";
+      const message = `Commande n°${code}\nPensez à confirmer la réception de votre commande.`;
+      await localDispatchNotification({ title, message, targetUserIds: [uid], url: link, data: { type: "market_order_receive_reminder", orderId: o.id, orderNumber: code } });
       await logEvent({ category: "marketplace", action: "reminder.received", status: "success", userId: uid, context: { orderId: o.id } });
     }
 
@@ -8729,7 +8818,7 @@ async function runMarketplaceRemindersOnce() {
       .select("id, customer_user_id, order_number, buyer_received_at")
       .eq("status", "paid")
       .not("buyer_received_at", "is", null)
-      .lte("buyer_received_at", threeDaysAgo)
+      .lte("buyer_received_at", twoDaysAgo)
       .limit(200);
 
     const list2 = Array.isArray(orders2) ? orders2 : [];
@@ -8747,15 +8836,53 @@ async function runMarketplaceRemindersOnce() {
         .from("notifications")
         .select("id")
         .eq("user_id", uid)
-        .eq("type", "market_order_reminder_review")
+        .eq("type", "market_order_review_reminder")
         .eq("link", link)
         .gt("created_at", new Date(now - 30 * 24 * 60 * 60 * 1000).toISOString())
         .maybeSingle();
       if (exist2 && exist2.id) continue;
-      const title = "⭐ Donnez votre avis";
-      const message = `Espace Marketplace -\nNotez votre expérience ${formatOrderShort(o)}`;
-      await localDispatchNotification({ title, message, targetUserIds: [uid], url: link, data: { type: "market_order_reminder_review", orderId: o.id } });
+      const code = await getOrderDisplayCode(o.id);
+      const title = "Marketplace";
+      const message = `Commande n°${code}\nVotre avis compte ! Laissez un avis sur votre commande.`;
+      await localDispatchNotification({ title, message, targetUserIds: [uid], url: link, data: { type: "market_order_review_reminder", orderId: o.id, orderNumber: code } });
       await logEvent({ category: "marketplace", action: "reminder.review", status: "success", userId: uid, context: { orderId: o.id } });
+    }
+
+    // Fallback: avis J+5 après completion si pas de buyer_received_at
+    const { data: orders3 } = await supabase
+      .from("partner_orders")
+      .select("id, customer_user_id, order_number, fulfillment_status, fulfillment_updated_at, buyer_received_at")
+      .eq("status", "paid")
+      .eq("fulfillment_status", "completed")
+      .is("buyer_received_at", null)
+      .lte("fulfillment_updated_at", fiveDaysAgo)
+      .limit(200);
+
+    const list3 = Array.isArray(orders3) ? orders3 : [];
+    for (const o of list3) {
+      const uid = o && o.customer_user_id ? String(o.customer_user_id) : null;
+      if (!uid) continue;
+      const { data: hasRating } = await supabase
+        .from("marketplace_partner_ratings")
+        .select("id")
+        .eq("order_id", o.id)
+        .maybeSingle();
+      if (hasRating && hasRating.id) continue;
+      const link = `/market/orders/${o.id}`;
+      const { data: exist3 } = await supabase
+        .from("notifications")
+        .select("id")
+        .eq("user_id", uid)
+        .eq("type", "market_order_review_reminder")
+        .eq("link", link)
+        .gt("created_at", new Date(now - 30 * 24 * 60 * 60 * 1000).toISOString())
+        .maybeSingle();
+      if (exist3 && exist3.id) continue;
+      const code = await getOrderDisplayCode(o.id);
+      const title = "Marketplace";
+      const message = `Commande n°${code}\nVotre avis compte ! Laissez un avis sur votre commande.`;
+      await localDispatchNotification({ title, message, targetUserIds: [uid], url: link, data: { type: "market_order_review_reminder", orderId: o.id, orderNumber: code } });
+      await logEvent({ category: "marketplace", action: "reminder.review.fallback", status: "success", userId: uid, context: { orderId: o.id } });
     }
   } catch (e) {
     await logEvent({ category: "marketplace", action: "reminders.error", status: "error", context: { error: e?.message || String(e) } });
