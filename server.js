@@ -103,6 +103,52 @@ app.get("/api/terms/config", async (_req, res) => {
   }
 });
 
+// Broadcast notification: segment -> userIds -> dispatch
+app.post("/notifications/broadcast", async (req, res) => {
+  if (NOTIF_PROVIDER !== "supabase_light") return res.status(200).json({ ignored: true });
+
+  try {
+    const { title, message, data = {}, url = "/", segment = "subscribed_users" } = req.body || {};
+    if (!title || !message) return res.status(400).json({ error: "title et message requis" });
+
+    // 1) Résoudre le segment vers une liste d'utilisateurs
+    let userIds = [];
+    if (!segment || segment === "subscribed_users") {
+      try {
+        const { data: webSubs } = await supabase
+          .from("push_subscriptions")
+          .select("user_id")
+          .not("user_id", "is", null)
+          .limit(5000);
+        const { data: nativeTokens } = await supabase
+          .from("device_push_tokens")
+          .select("user_id")
+          .eq("enabled", true)
+          .not("user_id", "is", null)
+          .limit(5000);
+        const set = new Set();
+        (webSubs || []).forEach((r) => { if (r?.user_id) set.add(String(r.user_id)); });
+        (nativeTokens || []).forEach((r) => { if (r?.user_id) set.add(String(r.user_id)); });
+        userIds = Array.from(set);
+      } catch (e) {
+        console.warn("⚠️ broadcast.resolve_segment_error:", e?.message || e);
+      }
+    }
+
+    if (!Array.isArray(userIds) || userIds.length === 0) {
+      return res.status(200).json({ success: false, reason: "no_targets" });
+    }
+
+    // 2) Relayer via le dispatcher standard (web + natif)
+    await localDispatchNotification({ title, message, targetUserIds: userIds, url, data });
+    return res.json({ success: true, target_count: userIds.length });
+  } catch (e) {
+    console.error("❌ Erreur /notifications/broadcast:", e);
+    await logEvent({ category: "notifications", action: "broadcast", status: "error", context: { error: e?.message || e } });
+    return res.status(500).json({ error: e?.message || "Erreur interne" });
+  }
+});
+
 // Accepter la charte acheteur pour une commande (avant paiement)
 app.post("/api/market/orders/:orderId/terms/buyer", async (req, res) => {
   try {
@@ -8091,6 +8137,12 @@ app.post("/api/push/subscribe", (req, res, next) => {
 app.post("/api/notifications/dispatch", (req, res, next) => {
   logAliasOnce("🔁 Alias activé : /api/notifications/dispatch → /notifications/dispatch");
   req.url = "/notifications/dispatch";
+  app._router.handle(req, res, next);
+});
+
+app.post("/api/notifications/broadcast", (req, res, next) => {
+  logAliasOnce("🔁 Alias activé : /api/notifications/broadcast → /notifications/broadcast");
+  req.url = "/notifications/broadcast";
   app._router.handle(req, res, next);
 });
 
