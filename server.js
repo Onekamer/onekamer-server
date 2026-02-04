@@ -742,6 +742,131 @@ const supabase = {
 
 const fxService = createFxService({ supabase, fetchImpl: fetch });
 
+// ============================================================
+// 👍 Intérêts Annonces / Événements (API only, sans fallback front)
+// ============================================================
+app.post("/api/annonces/:annonceId/interest", async (req, res) => {
+  try {
+    const guard = await requireUserJWT(req);
+    if (!guard.ok) return res.status(guard.status).json({ error: guard.error });
+    const userId = guard.userId;
+    const { annonceId } = req.params;
+    if (!annonceId) return res.status(400).json({ error: "annonceId requis" });
+
+    const { data: existing } = await supabase
+      .from("annonces_interests")
+      .select("id")
+      .eq("annonce_id", annonceId)
+      .eq("user_id", userId)
+      .maybeSingle();
+
+    if (existing) {
+      await supabase.from("annonces_interests").delete().eq("id", existing.id);
+    } else {
+      await supabase.from("annonces_interests").insert({ annonce_id: annonceId, user_id: userId });
+    }
+
+    const { count } = await supabase
+      .from("annonces_interests")
+      .select("id", { count: "exact", head: true })
+      .eq("annonce_id", annonceId);
+    const interestsCount = Number(count || 0);
+    await supabase.from("annonces").update({ interests_count: interestsCount }).eq("id", annonceId);
+
+    return res.json({ interested: !existing, interests_count: interestsCount });
+  } catch (e) {
+    return res.status(500).json({ error: e?.message || "Erreur interne" });
+  }
+});
+
+app.get("/api/annonces/:annonceId/interest/status", async (req, res) => {
+  try {
+    const guard = await requireUserJWT(req);
+    if (!guard.ok) return res.status(guard.status).json({ error: guard.error });
+    const userId = guard.userId;
+    const { annonceId } = req.params;
+    if (!annonceId) return res.status(400).json({ error: "annonceId requis" });
+
+    const { data: row } = await supabase
+      .from("annonces_interests")
+      .select("id")
+      .eq("annonce_id", annonceId)
+      .eq("user_id", userId)
+      .maybeSingle();
+
+    const { count } = await supabase
+      .from("annonces_interests")
+      .select("id", { count: "exact", head: true })
+      .eq("annonce_id", annonceId);
+    const interestsCount = Number(count || 0);
+
+    return res.json({ interested: !!row, interests_count: interestsCount });
+  } catch (e) {
+    return res.status(500).json({ error: e?.message || "Erreur interne" });
+  }
+});
+
+app.post("/api/evenements/:eventId/interest", async (req, res) => {
+  try {
+    const guard = await requireUserJWT(req);
+    if (!guard.ok) return res.status(guard.status).json({ error: guard.error });
+    const userId = guard.userId;
+    const { eventId } = req.params;
+    if (!eventId) return res.status(400).json({ error: "eventId requis" });
+
+    const { data: existing } = await supabase
+      .from("evenements_interests")
+      .select("id")
+      .eq("event_id", eventId)
+      .eq("user_id", userId)
+      .maybeSingle();
+
+    if (existing) {
+      await supabase.from("evenements_interests").delete().eq("id", existing.id);
+    } else {
+      await supabase.from("evenements_interests").insert({ event_id: eventId, user_id: userId });
+    }
+
+    const { count } = await supabase
+      .from("evenements_interests")
+      .select("id", { count: "exact", head: true })
+      .eq("event_id", eventId);
+    const interestsCount = Number(count || 0);
+    await supabase.from("evenements").update({ interests_count: interestsCount }).eq("id", eventId);
+
+    return res.json({ interested: !existing, interests_count: interestsCount });
+  } catch (e) {
+    return res.status(500).json({ error: e?.message || "Erreur interne" });
+  }
+});
+
+app.get("/api/evenements/:eventId/interest/status", async (req, res) => {
+  try {
+    const guard = await requireUserJWT(req);
+    if (!guard.ok) return res.status(guard.status).json({ error: guard.error });
+    const userId = guard.userId;
+    const { eventId } = req.params;
+    if (!eventId) return res.status(400).json({ error: "eventId requis" });
+
+    const { data: row } = await supabase
+      .from("evenements_interests")
+      .select("id")
+      .eq("event_id", eventId)
+      .eq("user_id", userId)
+      .maybeSingle();
+
+    const { count } = await supabase
+      .from("evenements_interests")
+      .select("id", { count: "exact", head: true })
+      .eq("event_id", eventId);
+    const interestsCount = Number(count || 0);
+
+    return res.json({ interested: !!row, interests_count: interestsCount });
+  } catch (e) {
+    return res.status(500).json({ error: e?.message || "Erreur interne" });
+  }
+});
+
 app.get("/api/market/fx-rate", async (req, res) => {
   try {
     const from = String(req.query.from || "").trim().toUpperCase();
