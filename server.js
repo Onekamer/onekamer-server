@@ -773,6 +773,23 @@ app.post("/api/annonces/:annonceId/interest", async (req, res) => {
     const interestsCount = Number(count || 0);
     await supabase.from("annonces").update({ interests_count: interestsCount }).eq("id", annonceId);
 
+    if (!existing && interestsCount > 0 && interestsCount % 5 === 0) {
+      const { data: annonceRow } = await supabase
+        .from("annonces")
+        .select("id, user_id, titre")
+        .eq("id", annonceId)
+        .maybeSingle();
+      const authorId = annonceRow?.user_id;
+      if (authorId && String(authorId) !== String(userId)) {
+        const title = "Annonces";
+        const message = `Votre annonce "${annonceRow?.titre || ""}" a atteint ${interestsCount} intéressés.`;
+        const url = `/annonces?annonceId=${encodeURIComponent(String(annonceId))}`;
+        try {
+          await localDispatchNotification({ title, message, targetUserIds: [authorId], url, data: { type: "annonce_interest_milestone", annonceId, milestone: interestsCount } });
+        } catch {}
+      }
+    }
+
     return res.json({ interested: !existing, interests_count: interestsCount });
   } catch (e) {
     return res.status(500).json({ error: e?.message || "Erreur interne" });
@@ -833,6 +850,23 @@ app.post("/api/evenements/:eventId/interest", async (req, res) => {
       .eq("event_id", eventId);
     const interestsCount = Number(count || 0);
     await supabase.from("evenements").update({ interests_count: interestsCount }).eq("id", eventId);
+
+    if (!existing && interestsCount > 0 && interestsCount % 5 === 0) {
+      const { data: eventRow } = await supabase
+        .from("evenements")
+        .select("id, user_id, title")
+        .eq("id", eventId)
+        .maybeSingle();
+      const authorId = eventRow?.user_id;
+      if (authorId && String(authorId) !== String(userId)) {
+        const title = "Événements";
+        const message = `Votre événement "${eventRow?.title || ""}" a atteint ${interestsCount} intéressés.`;
+        const url = `/evenements?eventId=${encodeURIComponent(String(eventId))}`;
+        try {
+          await localDispatchNotification({ title, message, targetUserIds: [authorId], url, data: { type: "evenement_interest_milestone", eventId, milestone: interestsCount } });
+        } catch {}
+      }
+    }
 
     return res.json({ interested: !existing, interests_count: interestsCount });
   } catch (e) {
