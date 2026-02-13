@@ -329,7 +329,7 @@ async function applyBusinessEffect({ userId, mapping, purchasedAt, expiresAt, pr
         delta: coinsToAdd,
         kind: "purchase_in",
         ref_type: "iap",
-        ref_id: providerTxId || mapping.pack_id,
+        ref_id: mapping.pack_id || null,
         balance_after: finalBalance,
         metadata: {
           platform: platform || null,
@@ -337,6 +337,7 @@ async function applyBusinessEffect({ userId, mapping, purchasedAt, expiresAt, pr
           productId: storeProductId || null,
           pack_id: mapping.pack_id || null,
           purchased_at: purchasedAt || null,
+          tx_id: providerTxId || null,
         },
       };
       const { error: ledErr } = await supabase
