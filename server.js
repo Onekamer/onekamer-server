@@ -1607,7 +1607,72 @@ app.get("/api/okcoins/ledger", async (req, res) => {
       return { ...it, direction, other_username, anonymous };
     });
 
-    return res.json({ items: enriched, total: typeof count === "number" ? count : null, limit, offset });
+    // Agrégation des achats IAP (coins) pour l'historique, au cas où une écriture ledger aurait échoué
+    try {
+      const ledgerTxIds = new Set(
+        (enriched || [])
+          .map((e) => (e && e.metadata && e.metadata.tx_id ? String(e.metadata.tx_id) : null))
+          .filter(Boolean)
+      );
+      const { data: txs } = await supabase
+        .from("iap_transactions")
+        .select("id, transaction_id, product_id, product_type, purchased_at, provider, platform, status")
+        .eq("user_id", guard.userId)
+        .eq("product_type", "coins")
+        .order("purchased_at", { ascending: false })
+        .limit(limit);
+
+      const prodIds = Array.from(new Set((txs || []).map((t) => t?.product_id).filter(Boolean)));
+      let maps = [];
+      if (prodIds.length) {
+        const { data: m } = await supabase
+          .from("iap_product_map")
+          .select("store_product_id, pack_id, platform, provider")
+          .in("store_product_id", prodIds);
+        maps = Array.isArray(m) ? m : [];
+      }
+      const byProd = new Map(maps.map((r) => [String(r.store_product_id), r.pack_id]));
+      const packIds = Array.from(new Set(maps.map((r) => r.pack_id).filter(Boolean)));
+      let packs = [];
+      if (packIds.length) {
+        const { data: p } = await supabase
+          .from("okcoins_packs")
+          .select("id, coins")
+          .in("id", packIds);
+        packs = Array.isArray(p) ? p : [];
+      }
+      const coinsByPack = new Map(packs.map((p) => [p.id, Number(p.coins || 0)]));
+
+      const txEntries = (txs || []).map((tx) => {
+        if (ledgerTxIds.has(String(tx.transaction_id))) return null;
+        const packId = byProd.get(String(tx.product_id));
+        const coins = packId && coinsByPack.has(packId) ? coinsByPack.get(packId) : 0;
+        return {
+          id: `iap_${tx.id}`,
+          created_at: tx.purchased_at || new Date().toISOString(),
+          delta: Math.max(0, Number(coins || 0)),
+          kind: "purchase_in",
+          ref_type: "iap",
+          ref_id: packId || null,
+          balance_after: null,
+          metadata: {
+            provider: tx.provider,
+            platform: tx.platform,
+            productId: tx.product_id,
+            tx_id: tx.transaction_id,
+          },
+          direction: "in",
+          other_username: null,
+          anonymous: false,
+        };
+      }).filter(Boolean);
+
+      const merged = [...enriched, ...txEntries];
+      merged.sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime());
+      return res.json({ items: merged, total: typeof count === "number" ? count : null, limit, offset });
+    } catch (_aggErr) {
+      return res.json({ items: enriched, total: typeof count === "number" ? count : null, limit, offset });
+    }
   } catch (e) {
     return res.status(500).json({ error: e?.message || "Erreur interne" });
   }
