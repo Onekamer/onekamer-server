@@ -342,7 +342,18 @@ async function applyBusinessEffect({ userId, mapping, purchasedAt, expiresAt, pr
       const { error: ledErr } = await supabase
         .from("okcoins_ledger")
         .insert(ledgerPayload);
-      if (ledErr) throw Object.assign(new Error("Supabase error: okcoins_ledger insert"), { details: ledErr });
+      if (ledErr) {
+        try {
+          const fallback = { ...ledgerPayload, kind: "recharge_in", metadata: { ...ledgerPayload.metadata, fallback_kind: true } };
+          const { error: ledErr2 } = await supabase.from("okcoins_ledger").insert(fallback);
+          if (ledErr2) {
+            console.warn("okcoins_ledger insert failed", ledErr, ledErr2);
+          }
+        } catch (e) {
+          console.warn("okcoins_ledger insert exception", e);
+        }
+        // Ne pas jeter d'erreur: l'achat doit rester réussi même si le ledger échoue
+      }
     }
 
     return { kind: "coins", pack_id: mapping.pack_id, coins_added: coinsToAdd };
