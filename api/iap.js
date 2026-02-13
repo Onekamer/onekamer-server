@@ -197,7 +197,7 @@ async function insertTransaction({
 }
 
 /** COMMUN: applique l’effet business en fonction de kind */
-async function applyBusinessEffect({ userId, mapping, purchasedAt, expiresAt }) {
+async function applyBusinessEffect({ userId, mapping, purchasedAt, expiresAt, providerTxId, storeProductId, platform, provider, isNewTx = false }) {
   if (mapping.kind === "subscription") {
     // NOTE: on stocke plan_key dans abonnements.plan_name (chez vous)
     // IMPORTANT: profile_id doit correspondre à userId chez vous (sinon faudra mapper)
@@ -304,12 +304,14 @@ async function applyBusinessEffect({ userId, mapping, purchasedAt, expiresAt }) 
 
     if (balErr) throw Object.assign(new Error("Supabase error: okcoins_users_balance read"), { details: balErr });
 
+    let finalBalance;
     if (!bal) {
       const { error: insErr } = await supabase
         .from("okcoins_users_balance")
         .insert({ user_id: userId, coins_balance: coinsToAdd });
 
       if (insErr) throw Object.assign(new Error("Supabase error: okcoins_users_balance insert"), { details: insErr });
+      finalBalance = coinsToAdd;
     } else {
       const newBal = Number(bal.coins_balance || 0) + coinsToAdd;
       const { error: updErr } = await supabase
@@ -318,6 +320,29 @@ async function applyBusinessEffect({ userId, mapping, purchasedAt, expiresAt }) 
         .eq("user_id", userId);
 
       if (updErr) throw Object.assign(new Error("Supabase error: okcoins_users_balance update"), { details: updErr });
+      finalBalance = newBal;
+    }
+
+    if (isNewTx) {
+      const ledgerPayload = {
+        user_id: userId,
+        delta: coinsToAdd,
+        kind: "purchase_in",
+        ref_type: "iap",
+        ref_id: providerTxId || mapping.pack_id,
+        balance_after: finalBalance,
+        metadata: {
+          platform: platform || null,
+          provider: provider || null,
+          productId: storeProductId || null,
+          pack_id: mapping.pack_id || null,
+          purchased_at: purchasedAt || null,
+        },
+      };
+      const { error: ledErr } = await supabase
+        .from("okcoins_ledger")
+        .insert(ledgerPayload);
+      if (ledErr) throw Object.assign(new Error("Supabase error: okcoins_ledger insert"), { details: ledErr });
     }
 
     return { kind: "coins", pack_id: mapping.pack_id, coins_added: coinsToAdd };
@@ -370,6 +395,11 @@ router.post("/iap/verify", async (req, res) => {
         mapping,
         purchasedAt: verified.purchasedAt,
         expiresAt: verified.expiresAt,
+        providerTxId: verified.providerTxId,
+        storeProductId: verified.storeProductId,
+        platform,
+        provider,
+        isNewTx: false,
       });
 
       return res.status(200).json({
@@ -408,6 +438,11 @@ router.post("/iap/verify", async (req, res) => {
         mapping,
         purchasedAt: verified.purchasedAt,
         expiresAt: verified.expiresAt,
+        providerTxId: verified.providerTxId,
+        storeProductId: verified.storeProductId,
+        platform,
+        provider,
+        isNewTx: false,
       });
 
       return res.status(200).json({
@@ -424,6 +459,11 @@ router.post("/iap/verify", async (req, res) => {
       mapping,
       purchasedAt: verified.purchasedAt,
       expiresAt: verified.expiresAt,
+      providerTxId: verified.providerTxId,
+      storeProductId: verified.storeProductId,
+      platform,
+      provider,
+      isNewTx: true,
     });
 
     return res.status(200).json({
