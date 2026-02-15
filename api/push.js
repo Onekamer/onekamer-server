@@ -94,7 +94,13 @@ router.post("/push/send", async (req, res) => {
       .in("user_id", targetUserIds);
 
     const icon = "https://onekamer-media-cdn.b-cdn.net/logo/IMG_0885%202.PNG";
-    const payload = (u) => JSON.stringify({ title, body: message, icon, url, data });
+    const payload = (u) => JSON.stringify({
+      title,
+      body: message,
+      icon,
+      url,
+      data: { ...(data || {}), userId: u },
+    });
 
     let sent = 0;
     if (Array.isArray(subs)) {

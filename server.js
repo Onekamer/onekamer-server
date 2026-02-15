@@ -8120,7 +8120,8 @@ app.post("/push/subscribe", bodyParser.json(), async (req, res) => {
       return res.status(400).json({ error: "userId, endpoint, keys.p256dh et keys.auth requis" });
     }
 
-    await supabase.from("push_subscriptions").delete().eq("endpoint", endpoint);
+    // Ne supprime que l'ancienne entrée pour CE user_id et CE endpoint
+    await supabase.from("push_subscriptions").delete().eq("endpoint", endpoint).eq("user_id", userId);
     const { error } = await supabase.from("push_subscriptions").insert({
       user_id: userId,
       endpoint,
