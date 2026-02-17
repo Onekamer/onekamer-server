@@ -365,6 +365,44 @@ async function applyBusinessEffect({ userId, mapping, purchasedAt, expiresAt, pr
       }
     }
 
+    // Attribution automatique des badges OK Coins atteints (idempotent)
+    try {
+      // 1) Lire points actuels
+      const { data: bal2 } = await supabase
+        .from("okcoins_users_balance")
+        .select("points_total")
+        .eq("user_id", userId)
+        .maybeSingle();
+      const pts = Number(bal2?.points_total || 0);
+      if (Number.isFinite(pts)) {
+        // 2) Badges éligibles
+        const { data: allBadges } = await supabase
+          .from("badges_ok_coins")
+          .select("id, points_required")
+          .order("points_required", { ascending: true });
+        const eligible = (allBadges || [])
+          .filter((b) => Number(b?.points_required || 0) <= pts)
+          .map((b) => b.id);
+        if (eligible.length) {
+          // 3) Déjà attribués
+          const { data: existing } = await supabase
+            .from("users_badge")
+            .select("badge_id")
+            .eq("user_id", userId)
+            .in("badge_id", eligible);
+          const existingSet = new Set((existing || []).map((r) => r.badge_id));
+          // 4) Insérer manquants
+          const nowIso = new Date().toISOString();
+          const toInsert = eligible
+            .filter((id) => !existingSet.has(id))
+            .map((badge_id) => ({ user_id: userId, badge_id, unlocked_at: nowIso }));
+          if (toInsert.length) {
+            await supabase.from("users_badge").insert(toInsert);
+          }
+        }
+      }
+    } catch {}
+
     return { kind: "coins", pack_id: mapping.pack_id, coins_added: coinsToAdd };
   }
 
@@ -672,7 +710,7 @@ router.get("/iap/subscription", async (req, res) => {
 
     const { data, error } = await supabase
       .from("abonnements")
-      .select("profile_id, plan_name, status, start_date, end_date, auto_renew")
+      .select("profile_id, plan_name, status, start_date, end_date, auto_renew, is_permanent")
       .eq("profile_id", userId)
       .order("end_date", { ascending: false })
       .limit(1)

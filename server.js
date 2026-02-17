@@ -1564,6 +1564,59 @@ async function getUserOkcBalanceSnapshot(userId) {
   return { coins_balance, points_total, pending, available };
 }
 
+// Décerner automatiquement les badges OK Coins atteints (idempotent)
+async function awardOkCoinsBadges(userId) {
+  try {
+    const safeId = String(userId || '').trim();
+    if (!safeId) return;
+
+    // 1) Lire les points actuels
+    const { data: bal } = await supabase
+      .from('okcoins_users_balance')
+      .select('points_total')
+      .eq('user_id', safeId)
+      .maybeSingle();
+    const points = Number(bal?.points_total || 0);
+    if (!Number.isFinite(points)) return;
+
+    // 2) Badges OK Coins éligibles
+    const { data: allBadges } = await supabase
+      .from('badges_ok_coins')
+      .select('id, points_required')
+      .order('points_required', { ascending: true });
+    const eligible = (allBadges || [])
+      .filter((b) => Number(b?.points_required || 0) <= points)
+      .map((b) => b.id);
+    if (!eligible.length) return;
+
+    // 3) Badges déjà attribués
+    const { data: existing } = await supabase
+      .from('users_badge')
+      .select('badge_id')
+      .eq('user_id', safeId)
+      .in('badge_id', eligible);
+    const existingSet = new Set((existing || []).map((r) => r.badge_id));
+
+    // 4) Insérer uniquement les manquants
+    const nowIso = new Date().toISOString();
+    const toInsert = eligible
+      .filter((id) => !existingSet.has(id))
+      .map((badge_id) => ({ user_id: safeId, badge_id, unlocked_at: nowIso }));
+    if (toInsert.length) {
+      const { error: insErr } = await supabase.from('users_badge').insert(toInsert);
+      if (insErr) {
+        await logEvent({ category: 'okcoins', action: 'badges.award', status: 'error', userId: safeId, context: { error: insErr.message, count: toInsert.length } });
+      } else {
+        await logEvent({ category: 'okcoins', action: 'badges.award', status: 'success', userId: safeId, context: { count: toInsert.length } });
+      }
+    }
+  } catch (e) {
+    try {
+      await logEvent({ category: 'okcoins', action: 'badges.award', status: 'error', userId: userId || null, context: { exception: String(e?.message || e) } });
+    } catch {}
+  }
+}
+
 // Solde disponible utilisateur
 app.get("/api/okcoins/balance", async (req, res) => {
   try {
@@ -5923,6 +5976,8 @@ async function stripeWebhookHandler(req, res) {
               await logEvent({ category: "okcoins", action: "pi.succeeded.credit", status: "error", userId, context: { packId, rpc_error: error.message, payment_intent_id: pi.id } });
             } else {
               await logEvent({ category: "okcoins", action: "pi.succeeded.credit", status: "success", userId, context: { packId, payment_intent_id: pi.id } });
+              // Décerner les badges OK Coins éventuellement atteints
+              try { await awardOkCoinsBadges(userId); } catch {}
             }
           } catch (e) {
             await logEvent({ category: "okcoins", action: "pi.succeeded.credit", status: "error", userId, context: { packId, error: e?.message || String(e), payment_intent_id: pi.id } });
@@ -6356,6 +6411,8 @@ async function stripeWebhookHandler(req, res) {
               userId,
               context: { packId, data },
             });
+            // Décerner les badges OK Coins éventuellement atteints
+            try { await awardOkCoinsBadges(userId); } catch {}
           }
         } catch (e) {
           await logEvent({
