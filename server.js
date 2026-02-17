@@ -2450,11 +2450,38 @@ app.get("/api/trophies/my", async (req, res) => {
       .order("created_at", { ascending: true });
     if (tErr) return res.status(500).json({ error: tErr.message || "trophies_read_failed" });
 
-    const { data: mine, error: uErr } = await supabase
+    let { data: mine, error: uErr } = await supabase
       .from("user_trophies")
       .select("trophy_key, unlocked_at")
       .eq("user_id", guard.userId);
     if (uErr) return res.status(500).json({ error: uErr.message || "user_trophies_read_failed" });
+
+    // Auto-award: attribuer les trophées manquants si l'utilisateur est déjà éligible
+    try {
+      const allKeys = (Array.isArray(allTrophies) ? allTrophies : []).map((t) => String(t.key));
+      const unlocked = new Set((Array.isArray(mine) ? mine : []).map((r) => String(r.trophy_key)));
+      const toCheck = allKeys.filter((k) => !unlocked.has(k));
+      const eligibleKeys = [];
+      for (const k of toCheck) {
+        try {
+          const ok = await isEligibleForTrophy(guard.userId, k);
+          if (ok) eligibleKeys.push(k);
+        } catch {}
+      }
+      if (eligibleKeys.length > 0) {
+        const nowIso = new Date().toISOString();
+        try {
+          await supabase
+            .from("user_trophies")
+            .insert(eligibleKeys.map((k) => ({ user_id: guard.userId, trophy_key: k, unlocked_at: nowIso })));
+        } catch {}
+        const reread = await supabase
+          .from("user_trophies")
+          .select("trophy_key, unlocked_at")
+          .eq("user_id", guard.userId);
+        if (!reread.error) mine = Array.isArray(reread.data) ? reread.data : mine;
+      }
+    } catch {}
 
     const byKey = new Map((Array.isArray(mine) ? mine : []).map((r) => [String(r.trophy_key), r]));
     const items = (Array.isArray(allTrophies) ? allTrophies : []).map((t) => {
