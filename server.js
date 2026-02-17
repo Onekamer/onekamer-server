@@ -2287,6 +2287,239 @@ app.get("/api/invites/my-stats", async (req, res) => {
   }
 });
 
+// ============================================================
+// 🏆 Trophées (PROD) — Backend uniquement
+// ============================================================
+async function isEligibleForTrophy(userId, trophyKey) {
+  const k = String(trophyKey || "").trim().toLowerCase();
+  if (!userId || !k) return false;
+
+  if (k === "profile_complete") {
+    try {
+      const { data: prof } = await supabase
+        .from("profiles")
+        .select("username, avatar_url, bio")
+        .eq("id", userId)
+        .maybeSingle();
+      const username = String(prof?.username || "").trim();
+      const avatar = String(prof?.avatar_url || "").trim();
+      const bio = String(prof?.bio || "").trim();
+      return username.length > 0 && avatar.length > 0 && bio.length > 0;
+    } catch {
+      return false;
+    }
+  }
+
+  if (k === "first_post") {
+    try {
+      const { data } = await supabase
+        .from("posts")
+        .select("id")
+        .eq("user_id", userId)
+        .limit(1);
+      return Array.isArray(data) && data.length > 0;
+    } catch {
+      return false;
+    }
+  }
+
+  if (k === "first_referral") {
+    try {
+      const { data: invites } = await supabase
+        .from("invites")
+        .select("code")
+        .eq("inviter_user_id", userId)
+        .is("revoked_at", null)
+        .limit(1000);
+      const codes = Array.isArray(invites) ? invites.map((i) => i?.code).filter(Boolean) : [];
+      if (codes.length === 0) return false;
+      const { data: ev } = await supabase
+        .from("invite_events")
+        .select("id")
+        .in("code", codes.slice(0, 1000))
+        .eq("event", "signup")
+        .limit(1);
+      return Array.isArray(ev) && ev.length > 0;
+    } catch {
+      return false;
+    }
+  }
+
+  if (k === "first_comment") {
+    try {
+      const { data } = await supabase
+        .from("comments")
+        .select("id")
+        .eq("user_id", userId)
+        .limit(1);
+      return Array.isArray(data) && data.length > 0;
+    } catch {
+      return false;
+    }
+  }
+
+  if (k === "first_mention") {
+    try {
+      const { data } = await supabase
+        .from("comments")
+        .select("id")
+        .eq("user_id", userId)
+        .ilike("content", "%@%")
+        .limit(1);
+      return Array.isArray(data) && data.length > 0;
+    } catch {
+      return false;
+    }
+  }
+
+  if (k === "first_group") {
+    try {
+      const { data } = await supabase
+        .from("groupes")
+        .select("id")
+        .eq("fondateur_id", userId)
+        .limit(1);
+      return Array.isArray(data) && data.length > 0;
+    } catch {
+      return false;
+    }
+  }
+
+  if (k === "first_annonce") {
+    try {
+      const { data } = await supabase
+        .from("annonces")
+        .select("id")
+        .eq("user_id", userId)
+        .limit(1);
+      return Array.isArray(data) && data.length > 0;
+    } catch {
+      return false;
+    }
+  }
+
+  if (k === "first_event") {
+    try {
+      const { data } = await supabase
+        .from("evenements")
+        .select("id")
+        .eq("user_id", userId)
+        .limit(1);
+      return Array.isArray(data) && data.length > 0;
+    } catch {
+      return false;
+    }
+  }
+
+  return false;
+}
+
+const DEFAULT_TROPHIES = [
+  { key: "profile_complete", name: "Profil complet", description: "Ajoutez un avatar, une bio et un pseudo.", category: "Profil", icon_url: null },
+  { key: "first_post", name: "Première publication", description: "Publiez votre premier post.", category: "Publication", icon_url: null },
+  { key: "first_referral", name: "Ambassadeur junior", description: "Faites inscrire un membre via votre lien.", category: "Communauté", icon_url: null },
+  { key: "first_comment", name: "Premier commentaire", description: "Publiez votre premier commentaire.", category: "Communauté", icon_url: null },
+  { key: "first_mention", name: "Première mention", description: "Mentionnez quelqu'un avec @pseudo.", category: "Communauté", icon_url: null },
+  { key: "first_group", name: "Créateur de groupe", description: "Créez votre premier groupe.", category: "Communauté", icon_url: null },
+  { key: "first_annonce", name: "Première annonce", description: "Publiez votre première annonce.", category: "Annonces", icon_url: null },
+  { key: "first_event", name: "Premier événement", description: "Organisez votre premier événement.", category: "Événements", icon_url: null },
+];
+
+app.get("/api/trophies/my", async (req, res) => {
+  try {
+    const guard = await requireUserJWT(req);
+    if (!guard.ok) return res.status(guard.status).json({ error: guard.error });
+
+    const { data: existingRows, error: existErr } = await supabase
+      .from("trophies")
+      .select("id, key");
+    if (existErr) return res.status(500).json({ error: existErr.message || "trophies_read_failed" });
+    const existingKeys = new Set((Array.isArray(existingRows) ? existingRows : []).map((r) => String(r.key)));
+    const toInsert = DEFAULT_TROPHIES.filter((t) => !existingKeys.has(String(t.key)));
+    if (toInsert.length > 0) {
+      try {
+        await supabase.from("trophies").insert(toInsert);
+      } catch (e) {
+        // conflit silencieux
+      }
+    }
+
+    const { data: allTrophies, error: tErr } = await supabase
+      .from("trophies")
+      .select("id, key, name, description, category, icon_url")
+      .order("created_at", { ascending: true });
+    if (tErr) return res.status(500).json({ error: tErr.message || "trophies_read_failed" });
+
+    const { data: mine, error: uErr } = await supabase
+      .from("user_trophies")
+      .select("trophy_key, unlocked_at")
+      .eq("user_id", guard.userId);
+    if (uErr) return res.status(500).json({ error: uErr.message || "user_trophies_read_failed" });
+
+    const byKey = new Map((Array.isArray(mine) ? mine : []).map((r) => [String(r.trophy_key), r]));
+    const items = (Array.isArray(allTrophies) ? allTrophies : []).map((t) => {
+      const k = String(t.key);
+      const got = byKey.get(k) || null;
+      return {
+        key: t.key,
+        name: t.name,
+        description: t.description,
+        category: t.category,
+        icon_url: t.icon_url || null,
+        unlocked: !!got,
+        unlocked_at: got?.unlocked_at || null,
+      };
+    });
+
+    return res.json({ items });
+  } catch (e) {
+    return res.status(500).json({ error: e?.message || "Erreur interne" });
+  }
+});
+
+app.post("/api/trophies/award", bodyParser.json(), async (req, res) => {
+  try {
+    const guard = await requireUserJWT(req);
+    if (!guard.ok) return res.status(guard.status).json({ error: guard.error });
+
+    const rawKey = req.body?.trophy_key;
+    const trophyKey = String(rawKey || "").trim().toLowerCase();
+    if (!trophyKey) return res.status(400).json({ error: "missing_trophy_key" });
+
+    const { data: trophy, error: tErr } = await supabase
+      .from("trophies")
+      .select("id, key, name, description, category, icon_url")
+      .eq("key", trophyKey)
+      .maybeSingle();
+    if (tErr) return res.status(500).json({ error: tErr.message || "trophy_read_failed" });
+    if (!trophy) return res.status(404).json({ error: "trophy_not_found" });
+
+    const { data: already, error: aErr } = await supabase
+      .from("user_trophies")
+      .select("trophy_key, unlocked_at")
+      .eq("user_id", guard.userId)
+      .eq("trophy_key", trophyKey)
+      .maybeSingle();
+    if (aErr) return res.status(500).json({ error: aErr.message || "user_trophies_read_failed" });
+    if (already?.trophy_key) {
+      return res.json({ already_awarded: true, item: { trophy_key: already.trophy_key, unlocked_at: already.unlocked_at } });
+    }
+
+    const eligible = await isEligibleForTrophy(guard.userId, trophyKey);
+    if (!eligible) return res.status(400).json({ error: "not_eligible" });
+
+    const nowIso = new Date().toISOString();
+    const { error: insErr } = await supabase
+      .from("user_trophies")
+      .insert({ user_id: guard.userId, trophy_key: trophyKey, unlocked_at: nowIso });
+    if (insErr) return res.status(500).json({ error: insErr.message || "user_trophy_insert_failed" });
+
+    return res.json({ awarded: true, item: { trophy_key: trophyKey, unlocked_at: nowIso } });
+  } catch (e) {
+    return res.status(500).json({ error: e?.message || "Erreur interne" });
+  }
+});
+
 app.post("/api/presence/heartbeat", async (req, res) => {
   try {
     const guard = await requireUserJWT(req);
