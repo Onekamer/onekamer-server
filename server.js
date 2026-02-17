@@ -2459,6 +2459,7 @@ app.get("/api/trophies/my", async (req, res) => {
     // Auto-award: attribuer les trophées manquants si l'utilisateur est déjà éligible
     try {
       const allKeys = (Array.isArray(allTrophies) ? allTrophies : []).map((t) => String(t.key));
+      const idByKey = new Map((Array.isArray(allTrophies) ? allTrophies : []).map((t) => [String(t.key), t.id]));
       const unlocked = new Set((Array.isArray(mine) ? mine : []).map((r) => String(r.trophy_key)));
       const toCheck = allKeys.filter((k) => !unlocked.has(k));
       const eligibleKeys = [];
@@ -2473,7 +2474,11 @@ app.get("/api/trophies/my", async (req, res) => {
         try {
           await supabase
             .from("user_trophies")
-            .insert(eligibleKeys.map((k) => ({ user_id: guard.userId, trophy_key: k, unlocked_at: nowIso })));
+            .insert(
+              eligibleKeys
+                .filter((k) => idByKey.has(k))
+                .map((k) => ({ user_id: guard.userId, trophy_id: idByKey.get(k), trophy_key: k, unlocked_at: nowIso }))
+            );
         } catch {}
         const reread = await supabase
           .from("user_trophies")
@@ -2538,7 +2543,7 @@ app.post("/api/trophies/award", bodyParser.json(), async (req, res) => {
     const nowIso = new Date().toISOString();
     const { error: insErr } = await supabase
       .from("user_trophies")
-      .insert({ user_id: guard.userId, trophy_key: trophyKey, unlocked_at: nowIso });
+      .insert({ user_id: guard.userId, trophy_id: trophy.id, trophy_key: trophyKey, unlocked_at: nowIso });
     if (insErr) return res.status(500).json({ error: insErr.message || "user_trophy_insert_failed" });
 
     return res.json({ awarded: true, item: { trophy_key: trophyKey, unlocked_at: nowIso } });
