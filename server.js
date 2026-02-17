@@ -255,6 +255,10 @@ app.get("/api/partners/recommendations", async (req, res) => {
       count: counts.get(String(id)) || 0,
       recommended_by_me: mine.has(String(id)),
     }));
+    try {
+      res.set("Cache-Control", "no-store");
+      res.set("Vary", "Authorization");
+    } catch {}
     return res.json({ items });
   } catch (e) {
     return res.status(500).json({ error: e?.message || "Erreur interne" });
@@ -2503,6 +2507,10 @@ app.get("/api/trophies/my", async (req, res) => {
       };
     });
 
+    try {
+      res.set("Cache-Control", "no-store");
+      res.set("Vary", "Authorization");
+    } catch {}
     return res.json({ items });
   } catch (e) {
     return res.status(500).json({ error: e?.message || "Erreur interne" });
