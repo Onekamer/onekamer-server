@@ -267,9 +267,17 @@ async function applyBusinessEffect({ userId, mapping, purchasedAt, expiresAt, pr
         .update({ plan: mapping.plan_key, updated_at: new Date().toISOString() })
         .eq("id", userId);
     } else {
+      const { data: perm, error: permErr } = await supabase
+        .from("abonnements")
+        .select("id")
+        .eq("profile_id", userId)
+        .eq("is_permanent", true)
+        .limit(1)
+        .maybeSingle();
+      const finalPlan = !permErr && perm && perm.id ? "vip" : "free";
       await supabase
         .from("profiles")
-        .update({ plan: "free", updated_at: new Date().toISOString() })
+        .update({ plan: finalPlan, updated_at: new Date().toISOString() })
         .eq("id", userId);
     }
 
@@ -625,7 +633,19 @@ router.post("/iap/cancel", async (req, res) => {
       throw Object.assign(new Error("Supabase error: abonnements cancel"), { details: error });
     }
 
-    // Aligner le profil sur free pour l'UI
+    // Si VIP à vie, ne pas downgrader le plan
+    const { data: perm, error: permErr } = await supabase
+      .from("abonnements")
+      .select("id")
+      .eq("profile_id", userId)
+      .eq("is_permanent", true)
+      .limit(1)
+      .maybeSingle();
+    if (!permErr && perm && perm.id) {
+      return res.status(200).json({ ok: true, subscription: upd });
+    }
+
+    // Aligner le profil sur free pour l'UI si non-permanent
     try {
       await supabase
         .from("profiles")
@@ -777,6 +797,21 @@ router.post("/iap/sync-subscription", async (req, res) => {
     const nextStatus = active ? "active" : "expired";
     const nextPlan = active ? best.mapping.plan_key : "free";
 
+    // Protéger les VIP à vie contre le passage à free
+    let finalPlan = nextPlan;
+    if (finalPlan === "free") {
+      const { data: perm, error: permErr } = await supabase
+        .from("abonnements")
+        .select("id")
+        .eq("profile_id", userId)
+        .eq("is_permanent", true)
+        .limit(1)
+        .maybeSingle();
+      if (!permErr && perm && perm.id) {
+        finalPlan = "vip";
+      }
+    }
+
     const { data: sub, error: subSelErr } = await supabase
       .from("abonnements")
       .select("id, start_date")
@@ -799,7 +834,7 @@ router.post("/iap/sync-subscription", async (req, res) => {
         return res.status(500).json({ ok: false, error: updErr.message || "subscription_update_failed" });
       }
       try {
-        await supabase.from("profiles").update({ plan: nextPlan, updated_at: new Date().toISOString() }).eq("id", userId);
+        await supabase.from("profiles").update({ plan: finalPlan, updated_at: new Date().toISOString() }).eq("id", userId);
       } catch {}
       return res.status(200).json({ ok: true, subscription: up });
     } else {
@@ -812,7 +847,7 @@ router.post("/iap/sync-subscription", async (req, res) => {
         return res.status(500).json({ ok: false, error: insErr.message || "subscription_insert_failed" });
       }
       try {
-        await supabase.from("profiles").update({ plan: nextPlan, updated_at: new Date().toISOString() }).eq("id", userId);
+        await supabase.from("profiles").update({ plan: finalPlan, updated_at: new Date().toISOString() }).eq("id", userId);
       } catch {}
       return res.status(200).json({ ok: true, subscription: ins });
     }

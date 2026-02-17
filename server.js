@@ -2650,11 +2650,11 @@ async function requireVipOrAdminUser({ req }) {
   const plan = String(profile.plan || "free").toLowerCase();
   const isAdmin = Boolean(profile.is_admin) || String(profile.role || "").toLowerCase() === "admin";
   const isVip = plan === "vip";
-  if (!isAdmin) {
-    if (!isVip) return { ok: false, status: 403, error: "vip_required" };
+  let allowed = isAdmin || isVip;
+  if (!allowed) {
     const { data: sub, error: subErr } = await supabase
       .from("abonnements")
-      .select("status, end_date, auto_renew")
+      .select("status, end_date, auto_renew, is_permanent")
       .eq("profile_id", guard.userId)
       .order("end_date", { ascending: false })
       .limit(1)
@@ -2662,10 +2662,13 @@ async function requireVipOrAdminUser({ req }) {
     if (subErr) return { ok: false, status: 500, error: subErr.message || "subscription_read_failed" };
     const endDate = sub?.end_date ? new Date(sub.end_date) : null;
     const now = new Date();
-    if (!endDate || endDate <= now) {
-      return { ok: false, status: 403, error: "vip_required" };
+    if (sub?.is_permanent === true) {
+      allowed = true;
+    } else if (endDate && endDate > now) {
+      allowed = true;
     }
   }
+  if (!allowed) return { ok: false, status: 403, error: "vip_required" };
 
   return { ok: true, userId: guard.userId, token: guard.token, profile };
 }
@@ -9041,6 +9044,18 @@ app.post("/activate-free-plan", async (req, res) => {
         context: { reason: "missing userId" },
       });
       return res.status(400).json({ error: "userId requis" });
+    }
+
+    // Ne pas downgrader un utilisateur VIP à vie
+    const { data: perm, error: permErr } = await supabase
+      .from("abonnements")
+      .select("id")
+      .eq("profile_id", userId)
+      .eq("is_permanent", true)
+      .limit(1)
+      .maybeSingle();
+    if (!permErr && perm && perm.id) {
+      return res.json({ ok: true });
     }
 
     const { error: rpcErr } = await supabase.rpc("apply_plan_to_profile", {
