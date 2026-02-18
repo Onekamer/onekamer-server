@@ -3923,7 +3923,26 @@ app.post("/api/market/partners", bodyParser.json(), async (req, res) => {
     const guard = await requireVipOrAdminUser({ req });
     if (!guard.ok) return res.status(guard.status).json({ error: guard.error });
 
-    const { display_name, description, category, logo_url, phone, whatsapp, address, hours } = req.body || {};
+    const {
+      display_name,
+      description,
+      category,
+      logo_url,
+      phone,
+      whatsapp,
+      address,
+      hours,
+      // Facturation
+      vat_validation_status,
+      vat_number,
+      billing_address_line1,
+      billing_address_line2,
+      billing_city,
+      billing_postcode,
+      billing_region,
+      billing_country_code,
+      billing_email,
+    } = req.body || {};
 
     const name = String(display_name || "").trim();
     const desc = String(description || "").trim();
@@ -3934,6 +3953,13 @@ app.post("/api/market/partners", bodyParser.json(), async (req, res) => {
     if (!desc) return res.status(400).json({ error: "description requise" });
     if (!cat) return res.status(400).json({ error: "category requise" });
     if (!logo) return res.status(400).json({ error: "logo_url requis" });
+
+    // Contraintes facturation à la création
+    const iso2 = String(billing_country_code || "").trim().toUpperCase();
+    const vatStatus = String(vat_validation_status || "").trim().toLowerCase();
+    const allowedVat = new Set(["valid", "invalid", "unchecked"]);
+    if (!iso2) return res.status(400).json({ error: "billing_country_code requis" });
+    if (!allowedVat.has(vatStatus)) return res.status(400).json({ error: "vat_validation_status invalide" });
 
     const { data: existing, error: exErr } = await supabase
       .from("partners_market")
@@ -3960,6 +3986,16 @@ app.post("/api/market/partners", bodyParser.json(), async (req, res) => {
         whatsapp: whatsapp ? String(whatsapp).trim() : null,
         address: address ? String(address).trim() : null,
         hours: hours ? String(hours).trim() : null,
+        // Champs facturation initiaux
+        vat_validation_status: vatStatus,
+        vat_number: vat_number ? String(vat_number).trim() : null,
+        billing_address_line1: billing_address_line1 ? String(billing_address_line1).trim() : null,
+        billing_address_line2: billing_address_line2 ? String(billing_address_line2).trim() : null,
+        billing_city: billing_city ? String(billing_city).trim() : null,
+        billing_postcode: billing_postcode ? String(billing_postcode).trim() : null,
+        billing_region: billing_region ? String(billing_region).trim() : null,
+        billing_country_code: iso2,
+        billing_email: billing_email ? String(billing_email).trim().toLowerCase() : null,
         created_at: now,
         updated_at: now,
       })
