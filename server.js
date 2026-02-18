@@ -835,6 +835,7 @@ const EU_COUNTRIES = new Set(["AT","BE","BG","HR","CY","CZ","DK","EE","FI","FR",
 function computeVatSchemeForPartner(p) {
   const cc = String(p?.billing_country_code || p?.country_code || "").toUpperCase();
   const vatOk = String(p?.vat_validation_status || "").toLowerCase() === "valid" && !!p?.vat_number;
+  if (!cc) return { scheme: "default_20", rate: 20.0, note: null };
   if (cc === "FR") return { scheme: "fr_20", rate: 20.0, note: null };
   if (EU_COUNTRIES.has(cc)) {
     if (vatOk) return { scheme: "eu_reverse_charge", rate: 0.0, note: "Autoliquidation de la TVA — Article 196 de la Directive 2006/112/CE. TVA due par le preneur." };
