@@ -913,7 +913,7 @@ async function buildInvoicePdfBuffer({ invoice, partner, lines }) {
       doc.on("end", () => resolve(Buffer.concat(chunks)));
       // En‑tête simplifié; le header/footer final sera dessiné pour chaque page après le contenu
       doc.fillColor("#000");
-      try { doc.y = 150; } catch {}
+      try { doc.y = 170; } catch {}
       doc.fontSize(20).text("FACTURE", { align: "right" });
       doc.moveDown(0.5);
       doc.fontSize(10).text(`N°: ${invoice.number}`, { align: "right" });
@@ -971,7 +971,7 @@ async function buildInvoicePdfBuffer({ invoice, partner, lines }) {
 
           // Header: logo à gauche + texte ONEKAMER + ligne verte (ne pas traverser le logo)
           const headerY = 28;
-          const logoW = 90;
+          const logoW = 80; // légère réduction pour éviter chevauchement
           const gap = 12;
           const brandText = "ONEKAMER";
           const brandFontSize = 14;
@@ -980,14 +980,20 @@ async function buildInvoicePdfBuffer({ invoice, partner, lines }) {
           }
           // Libellé ONEKAMER à côté du logo
           try {
-            doc.font("Helvetica-Bold").fontSize(brandFontSize);
+            doc.font("Helvetica-Bold").fontSize(brandFontSize).fillColor("#000");
             const brandX = margins.left + logoW + gap;
-            const brandY = headerY + 20;
-            doc.fillColor("#000").text(brandText, brandX, brandY);
+            const brandY = headerY + 18;
+            doc.text(brandText, brandX, brandY);
           } catch {}
           // Ligne verte démarrant après le logo (et le texte)
-          const headerLineY = headerY + 60; // sous le bas du logo (fixe pour éviter chevauchement)
-          const lineStartX = margins.left + logoW + gap; // démarre après le logo
+          const headerLineY = headerY + logoW + 8; // sous le bas visuel du logo + padding
+          let lineStartX = margins.left + logoW + gap; // base: après logo
+          try {
+            // éviter de passer sous le texte ONEKAMER
+            const textW = doc.widthOfString ? doc.widthOfString(brandText) : 0;
+            const afterText = (margins.left + logoW + gap) + textW + 10;
+            if (Number.isFinite(afterText)) lineStartX = afterText;
+          } catch {}
           doc.save()
             .lineWidth(2)
             .strokeColor("#2BA84A")
@@ -1021,16 +1027,18 @@ async function buildInvoicePdfBuffer({ invoice, partner, lines }) {
           const pageNumText = `Page ${i + 1}/${range.count}`;
           doc.fontSize(8).fillColor("#000").text(pageNumText, width - margins.right - 60, height - margins.bottom - 24, { width: 60, align: "right" });
 
-          // Barres couleurs en bas (sur la barre verte)
-          const greenH = 10;
-          const greenY = height - greenH; // barre verte pleine largeur
-          doc.save().rect(0, greenY, width, greenH).fill("#2BA84A").restore();
-          const accentH = 4;
-          const accentY = greenY; // posé sur la barre verte
-          const redW = 160;
-          const yellowW = 140;
-          doc.save().rect((width / 2) - (redW / 2), accentY, redW, accentH).fill("#D62828").restore();
-          doc.save().rect(width - yellowW, accentY, yellowW, accentH).fill("#FFC107").restore();
+          // Barres couleurs en bas — 3 segments juxtaposés: vert, puis rouge, puis jaune
+          const barH = 10;
+          const barY = height - barH;
+          const redW = Math.max(80, Math.min(180, Math.round(width * 0.16)));
+          const yellowW = Math.max(80, Math.min(180, Math.round(width * 0.14)));
+          const greenW = Math.max(0, width - redW - yellowW);
+          // Vert (gauche)
+          doc.save().rect(0, barY, greenW, barH).fill("#2BA84A").restore();
+          // Rouge (au milieu, juxtaposé à droite du vert)
+          doc.save().rect(greenW, barY, redW, barH).fill("#D62828").restore();
+          // Jaune (droite)
+          doc.save().rect(greenW + redW, barY, yellowW, barH).fill("#FFC107").restore();
         }
       } catch {}
 
