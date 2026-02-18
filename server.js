@@ -982,18 +982,12 @@ async function buildInvoicePdfBuffer({ invoice, partner, lines }) {
           try {
             doc.font("Helvetica-Bold").fontSize(brandFontSize).fillColor("#000");
             const brandX = margins.left + logoW + gap;
-            const brandY = headerY + 24; // légèrement plus bas pour aligner au milieu du K
+            const brandY = headerY + 26;
             doc.text(brandText, brandX, brandY);
           } catch {}
           // Ligne verte démarrant après le logo (et le texte)
-          const headerLineY = headerY + logoW + 8; // sous le bas visuel du logo + padding
-          let lineStartX = margins.left + logoW + gap; // base: après logo
-          try {
-            // éviter de passer sous le texte ONEKAMER
-            const textW = doc.widthOfString ? doc.widthOfString(brandText) : 0;
-            const afterText = (margins.left + logoW + gap) + textW + 10;
-            if (Number.isFinite(afterText)) lineStartX = afterText;
-          } catch {}
+          const headerLineY = headerY + logoW + 8;
+          const lineStartX = margins.left;
           doc.save()
             .lineWidth(2)
             .strokeColor("#2BA84A")
