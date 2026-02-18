@@ -982,10 +982,10 @@ async function buildInvoicePdfBuffer({ invoice, partner, lines }) {
           try {
             doc.font("Helvetica-Bold").fontSize(brandFontSize).fillColor("#000");
             const brandX = margins.left + logoW + gap;
-            const brandY = headerY + 26;
+            const brandY = headerY + 30; // abaissé de ~4px
             doc.text(brandText, brandX, brandY);
           } catch {}
-          // Ligne verte démarrant après le logo (et le texte)
+          // Ligne verte pleine largeur depuis la marge gauche, sous le logo
           const headerLineY = headerY + logoW + 8;
           const lineStartX = margins.left;
           doc.save()
@@ -997,7 +997,7 @@ async function buildInvoicePdfBuffer({ invoice, partner, lines }) {
             .restore();
 
           // Footer: ligne verte, infos légales, barres couleurs, pagination
-          const footerTopY = height - margins.bottom - 60; // zone d'infos
+          const footerTopY = height - margins.bottom - 56; // abaissé de ~4px
           const footerLineY = footerTopY - 10;
           doc.save()
             .lineWidth(2)
