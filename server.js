@@ -913,7 +913,7 @@ async function buildInvoicePdfBuffer({ invoice, partner, lines }) {
       doc.on("end", () => resolve(Buffer.concat(chunks)));
       // En‑tête simplifié; le header/footer final sera dessiné pour chaque page après le contenu
       doc.fillColor("#000");
-      try { doc.y = 100; } catch {}
+      try { doc.y = 150; } catch {}
       doc.fontSize(20).text("FACTURE", { align: "right" });
       doc.moveDown(0.5);
       doc.fontSize(10).text(`N°: ${invoice.number}`, { align: "right" });
@@ -969,16 +969,29 @@ async function buildInvoicePdfBuffer({ invoice, partner, lines }) {
           doc.switchToPage(range.start + i);
           const { width, height, margins } = doc.page;
 
-          // Header: logo à gauche + ligne verte
+          // Header: logo à gauche + texte ONEKAMER + ligne verte (ne pas traverser le logo)
           const headerY = 28;
-          const headerLineY = 80;
+          const logoW = 90;
+          const gap = 12;
+          const brandText = "ONEKAMER";
+          const brandFontSize = 14;
           if (logoBuf) {
-            try { doc.image(logoBuf, margins.left, headerY, { width: 90 }); } catch {}
+            try { doc.image(logoBuf, margins.left, headerY, { width: logoW }); } catch {}
           }
+          // Libellé ONEKAMER à côté du logo
+          try {
+            doc.font("Helvetica-Bold").fontSize(brandFontSize);
+            const brandX = margins.left + logoW + gap;
+            const brandY = headerY + 20;
+            doc.fillColor("#000").text(brandText, brandX, brandY);
+          } catch {}
+          // Ligne verte démarrant après le logo (et le texte)
+          const headerLineY = headerY + 60; // sous le bas du logo (fixe pour éviter chevauchement)
+          const lineStartX = margins.left + logoW + gap; // démarre après le logo
           doc.save()
             .lineWidth(2)
             .strokeColor("#2BA84A")
-            .moveTo(margins.left, headerLineY)
+            .moveTo(lineStartX, headerLineY)
             .lineTo(width - margins.right, headerLineY)
             .stroke()
             .restore();
@@ -1006,18 +1019,18 @@ async function buildInvoicePdfBuffer({ invoice, partner, lines }) {
 
           // Pagination en bas droite (au-dessus des barres)
           const pageNumText = `Page ${i + 1}/${range.count}`;
-          doc.fontSize(8).fillColor("#000").text(pageNumText, width - margins.right - 60, height - margins.bottom - 20, { width: 60, align: "right" });
+          doc.fontSize(8).fillColor("#000").text(pageNumText, width - margins.right - 60, height - margins.bottom - 24, { width: 60, align: "right" });
 
-          // Barres couleurs en bas
+          // Barres couleurs en bas (sur la barre verte)
           const greenH = 10;
           const greenY = height - greenH; // barre verte pleine largeur
           doc.save().rect(0, greenY, width, greenH).fill("#2BA84A").restore();
           const accentH = 4;
-          const accentY = greenY - 4;
-          const redW = 80;
-          const yellowW = 80;
+          const accentY = greenY; // posé sur la barre verte
+          const redW = 160;
+          const yellowW = 140;
           doc.save().rect((width / 2) - (redW / 2), accentY, redW, accentH).fill("#D62828").restore();
-          doc.save().rect(width - yellowW - 16, accentY, yellowW, accentH).fill("#FFC107").restore();
+          doc.save().rect(width - yellowW, accentY, yellowW, accentH).fill("#FFC107").restore();
         }
       } catch {}
 
