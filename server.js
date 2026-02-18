@@ -89,6 +89,89 @@ app.get("/api/stripe/config", (_req, res) => {
   return res.json({ publishableKey: pk });
 });
 
+// Admin: ré-émission du PDF d'une facture (même numéro) — écrase le fichier existant
+app.post("/api/admin/market/invoices/:invoiceId/rebuild-pdf", bodyParser.json(), async (req, res) => {
+  try {
+    const verif = await verifyIsAdminJWT(req);
+    if (!verif.ok) {
+      const status = verif.reason === "forbidden" ? 403 : 401;
+      return res.status(status).json({ error: verif.reason });
+    }
+
+    const { invoiceId } = req.params;
+    if (!invoiceId) return res.status(400).json({ error: "invoiceId requis" });
+
+    const sb = getSupabaseClient();
+    const { data: inv, error: iErr } = await sb
+      .from("market_invoices")
+      .select("id, partner_id, number, period_start, period_end, currency, vat_scheme, vat_rate, vat_note, total_ht, total_tva, total_ttc, issued_at, pdf_bucket, pdf_path")
+      .eq("id", invoiceId)
+      .maybeSingle();
+    if (iErr) return res.status(500).json({ error: iErr.message || "invoice_read_failed" });
+    if (!inv) return res.status(404).json({ error: "invoice_not_found" });
+
+    const { data: partner, error: pErr } = await sb
+      .from("partners_market")
+      .select("id, display_name, legal_name, billing_address_line1, billing_address_line2, billing_city, billing_postcode, billing_region, billing_country_code, billing_email, country_code, vat_number, vat_validation_status")
+      .eq("id", inv.partner_id)
+      .maybeSingle();
+    if (pErr) return res.status(500).json({ error: pErr.message || "partner_read_failed" });
+    if (!partner) return res.status(404).json({ error: "partner_not_found" });
+
+    const { data: linesDb, error: lErr } = await sb
+      .from("market_invoice_lines")
+      .select("id, label, service_fee_ht, vat_rate, vat_amount, total_ttc, currency")
+      .eq("invoice_id", invoiceId)
+      .order("id", { ascending: true });
+    if (lErr) return res.status(500).json({ error: lErr.message || "invoice_lines_read_failed" });
+
+    const lines = (Array.isArray(linesDb) ? linesDb : []).map((ln) => ({
+      label: ln.label,
+      service_fee_ht: Math.round(Number(ln.service_fee_ht || 0) * 100),
+      vat_rate: Number(ln.vat_rate || 0),
+      vat_amount: Math.round(Number(ln.vat_amount || 0) * 100),
+      total_ttc: Math.round(Number(ln.total_ttc || 0) * 100),
+      currency: String(ln.currency || inv.currency || 'EUR').toUpperCase(),
+    }));
+
+    const invoiceForPdf = {
+      number: inv.number,
+      period_start: String(inv.period_start).slice(0, 10),
+      period_end: String(inv.period_end).slice(0, 10),
+      total_ht_cents: Math.round(Number(inv.total_ht || 0) * 100),
+      total_tva_cents: Math.round(Number(inv.total_tva || 0) * 100),
+      total_ttc_cents: Math.round(Number(inv.total_ttc || 0) * 100),
+      vat_note: inv.vat_note || null,
+      issued_at: inv.issued_at || new Date().toISOString(),
+    };
+
+    const pdfBuffer = await buildInvoicePdfBuffer({ invoice: invoiceForPdf, partner, lines });
+
+    let bucket = String(inv.pdf_bucket || '').trim() || 'invoices';
+    let path = String(inv.pdf_path || '').trim();
+    if (!path) {
+      const year = new Date(String(inv.period_start || '').slice(0,10)).getUTCFullYear();
+      const label = String(inv.period_start || '').slice(0,7) || `${year}-01`;
+      path = `${inv.partner_id}/${year}/${label}/${inv.number}.pdf`;
+    }
+
+    try { await sb.storage.createBucket(bucket, { public: false }); } catch {}
+    await uploadInvoicePdf({ bucket, path, buffer: pdfBuffer });
+
+    if (!inv.pdf_bucket || !inv.pdf_path) {
+      await sb
+        .from("market_invoices")
+        .update({ pdf_bucket: bucket, pdf_path: path })
+        .eq("id", invoiceId);
+    }
+
+    const { data: signed } = await sb.storage.from(bucket).createSignedUrl(path, 120);
+    return res.json({ ok: true, url: signed?.signedUrl || null, bucket, path });
+  } catch (e) {
+    return res.status(500).json({ error: e?.message || "Erreur interne" });
+  }
+});
+
 // Configuration chartes (versions courantes)
 app.get("/api/terms/config", async (_req, res) => {
   try {
@@ -828,12 +911,8 @@ async function buildInvoicePdfBuffer({ invoice, partner, lines }) {
       const chunks = [];
       doc.on("data", (b) => chunks.push(b));
       doc.on("end", () => resolve(Buffer.concat(chunks)));
-      doc.fillColor("#2BA84A").rect(50, 70, 495, 2).fill();
-      doc.fillColor("#000").fontSize(18).font("Helvetica-Bold").text("ONEKAMER", 50, 30);
-      const footerY = 770;
-      doc.fillColor("#2BA84A").rect(50, footerY, 495, 2).fill();
-      doc.fillColor("#000").fontSize(8).text("ONEKAMER SAS — 60 Rue François 1er - 75008 Paris", 50, footerY + 6, { width: 495, align: "center" });
-      doc.text("Email : contact@onekamer.co — SIREN 991 019 720 — TVA FR 54991019720", 50, footerY + 18, { width: 495, align: "center" });
+      // En‑tête simplifié sans bandeau
+      doc.fillColor("#000");
       doc.moveDown(2);
       doc.fontSize(20).text("FACTURE", { align: "right" });
       doc.moveDown(0.5);
@@ -843,9 +922,16 @@ async function buildInvoicePdfBuffer({ invoice, partner, lines }) {
       doc.moveDown(1);
       doc.fontSize(12).font("Helvetica-Bold").text(partner.legal_name || partner.display_name || "Partenaire marketplace");
       doc.fontSize(10).font("Helvetica");
-      const addr = [partner.billing_address_line1, partner.billing_address_line2, `${partner.billing_postcode || ""} ${partner.billing_city || ""}`.trim(), partner.billing_country_code].filter(Boolean).join("\n");
-      if (addr) doc.text(addr);
+      const billingLines = [
+        partner.billing_address_line1,
+        partner.billing_address_line2,
+        [partner.billing_postcode, partner.billing_city].filter(Boolean).join(" ").trim() || null,
+        partner.billing_region || null,
+        partner.billing_country_code || null,
+      ].filter(Boolean);
+      if (billingLines.length) doc.text(billingLines.join("\n"));
       if (partner.vat_number) doc.text(`N° TVA: ${partner.vat_number}`);
+      if (partner.billing_email) doc.text(`Email facturation: ${partner.billing_email}`);
       doc.moveDown(1);
       doc.font("Helvetica-Bold").text("Description", 50, doc.y, { continued: true });
       doc.text("HT (€)", 350, undefined, { width: 70, align: "right", continued: true });
@@ -864,6 +950,11 @@ async function buildInvoicePdfBuffer({ invoice, partner, lines }) {
       doc.text(`TOTAL TTC: ${formatMoneyCents(invoice.total_ttc_cents)} €`, { align: "right" });
       doc.font("Helvetica");
       if (invoice.vat_note) doc.moveDown(1).fontSize(9).text(invoice.vat_note, { align: "left" });
+
+      // Pied d’info (texte simple, pas de bandeau)
+      doc.moveDown(2);
+      doc.fontSize(8).fillColor("#444").text("ONEKAMER SAS — 60 Rue François 1er - 75008 Paris", { align: "center" });
+      doc.text("Email : contact@onekamer.co — SIREN 991 019 720 — TVA FR 54991019720", { align: "center" });
       doc.end();
     } catch (e) {
       reject(e);
@@ -9662,7 +9753,7 @@ app.post("/api/market/partners/:partnerId/invoices/generate", async (req, res) =
 
     const { data: partner, error: pErr } = await supabase
       .from("partners_market")
-      .select("id, display_name, legal_name, billing_address_line1, billing_address_line2, billing_city, billing_postcode, billing_region, billing_country_code, country_code, vat_number, vat_validation_status")
+      .select("id, display_name, legal_name, billing_address_line1, billing_address_line2, billing_city, billing_postcode, billing_region, billing_country_code, billing_email, country_code, vat_number, vat_validation_status")
       .eq("id", partnerId)
       .maybeSingle();
     if (pErr) return res.status(500).json({ error: pErr.message || "partner_read_failed" });
@@ -9800,6 +9891,144 @@ app.get("/api/market/partners/:partnerId/invoices/:invoiceId/pdf", async (req, r
 // ============================================================
 // 7️⃣ Lancement serveur
 // ============================================================
+
+// ============================================================
+// 🗓️ Cron mensuel — Auto-génération des factures N-1 (08:00, jour 1)
+// ============================================================
+let INVOICES_CRON_LOCK = false;
+async function runMonthlyInvoicesCronOnce() {
+  if (INVOICES_CRON_LOCK) return;
+  INVOICES_CRON_LOCK = true;
+  const sb = getSupabaseClient();
+  try {
+    const per = parseMonthPeriod(""); // défaut: mois précédent
+    const startIso = per.start.toISOString().slice(0, 10);
+    const endIso = per.end.toISOString().slice(0, 10);
+
+    const { data: paidOrders, error: oErr } = await sb
+      .from("partner_orders")
+      .select("id, partner_id, order_number, status, created_at, charge_currency, platform_fee_amount")
+      .eq("status", "paid")
+      .gte("created_at", startIso)
+      .lte("created_at", endIso)
+      .limit(20000);
+    if (oErr) {
+      await logEvent({ category: "invoices", action: "cron.scan_orders", status: "error", context: { error: oErr.message } });
+      return;
+    }
+    const list = Array.isArray(paidOrders) ? paidOrders : [];
+    if (!list.length) return;
+
+    const partnerIds = Array.from(new Set(list.map((o) => String(o.partner_id)).filter(Boolean)));
+    for (const partnerId of partnerIds) {
+      try {
+        const { data: already } = await sb
+          .from("market_invoices")
+          .select("id")
+          .eq("partner_id", partnerId)
+          .eq("period_start", startIso)
+          .eq("period_end", endIso)
+          .maybeSingle();
+        if (already && already.id) continue;
+
+        const { data: partner, error: pErr } = await sb
+          .from("partners_market")
+          .select("id, display_name, legal_name, billing_address_line1, billing_address_line2, billing_city, billing_postcode, billing_region, billing_country_code, billing_email, country_code, vat_number, vat_validation_status")
+          .eq("id", partnerId)
+          .maybeSingle();
+        if (pErr || !partner) continue;
+
+        const partnerOrders = list.filter((o) => String(o.partner_id) === String(partnerId));
+        if (!partnerOrders.length) continue;
+
+        const vat = computeVatSchemeForPartner(partner);
+        const vatRate = vat.rate;
+
+        let totalHtCents = 0;
+        const lines = [];
+        for (const od of partnerOrders) {
+          let fee = Number(od.platform_fee_amount || 0);
+          const curr = String(od.charge_currency || "EUR").toUpperCase();
+          if (!Number.isFinite(fee)) fee = 0;
+          if (curr !== "EUR") {
+            try {
+              const conv = await fxService.convertMinorAmount({ amount: fee, fromCurrency: curr, toCurrency: "EUR" });
+              fee = Number(conv?.amount || fee);
+            } catch {}
+          }
+          const vatAmount = Math.round(fee * (vatRate / 100));
+          const ttc = fee + vatAmount;
+          totalHtCents += fee;
+          lines.push({ label: `Frais de service Commande #${od.order_number || od.id}` , service_fee_ht: fee, vat_rate: vatRate, vat_amount: vatAmount, total_ttc: ttc, currency: "EUR", order_id: od.id });
+        }
+
+        if (!lines.length) continue;
+
+        const totalTvaCents = Math.round(totalHtCents * (vatRate / 100));
+        const totalTtcCents = totalHtCents + totalTvaCents;
+
+        const year = per.start.getUTCFullYear();
+        const nextNum = await generateNextInvoiceNumber({ supabase: sb, year });
+
+        let created = null;
+        for (let i = 0; i < 5 && !created; i++) {
+          const number = nextNum();
+          const { data: ins, error: insErr } = await sb
+            .from("market_invoices")
+            .insert({ partner_id: partnerId, number, period_start: startIso, period_end: endIso, currency: "EUR", vat_scheme: vat.scheme, vat_rate: vatRate, total_ht: (totalHtCents/100.0), total_tva: (totalTvaCents/100.0), total_ttc: (totalTtcCents/100.0), status: "draft", vat_note: vat.note, lines_count: lines.length })
+            .select("id, number")
+            .single();
+          if (insErr) {
+            if (String(insErr.message || "").includes("duplicate key value") || String(insErr.code || "") === "23505") continue;
+            await logEvent({ category: "invoices", action: "cron.insert", status: "error", context: { partnerId, error: insErr.message } });
+            break;
+          }
+          created = ins;
+        }
+        if (!created) continue;
+
+        const invoiceId = created.id;
+        const lineRows = lines.map((ln) => ({ invoice_id: invoiceId, order_id: ln.order_id, label: ln.label, service_fee_ht: (ln.service_fee_ht/100.0), vat_rate: ln.vat_rate, vat_amount: (ln.vat_amount/100.0), total_ttc: (ln.total_ttc/100.0), currency: "EUR" }));
+        const { error: lineErr } = await sb.from("market_invoice_lines").insert(lineRows);
+        if (lineErr) {
+          await logEvent({ category: "invoices", action: "cron.lines", status: "error", context: { partnerId, error: lineErr.message } });
+          continue;
+        }
+
+        const pdfBuffer = await buildInvoicePdfBuffer({ invoice: { number: created.number, period_start: startIso, period_end: endIso, total_ht_cents: totalHtCents, total_tva_cents: totalTvaCents, total_ttc_cents: totalTtcCents, vat_note: vat.note, issued_at: new Date().toISOString() }, partner, lines });
+        const path = `${partnerId}/${year}/${per.label}/${created.number}.pdf`;
+        try { await sb.storage.createBucket("invoices", { public: false }); } catch {}
+        try {
+          await uploadInvoicePdf({ bucket: "invoices", path, buffer: pdfBuffer });
+        } catch (e) {
+          await logEvent({ category: "invoices", action: "cron.upload", status: "error", context: { partnerId, error: e?.message || String(e) } });
+          continue;
+        }
+
+        const nowIso = new Date().toISOString();
+        const { error: updErr } = await sb
+          .from("market_invoices")
+          .update({ status: "issued", issued_at: nowIso, pdf_bucket: "invoices", pdf_path: path })
+          .eq("id", invoiceId);
+        if (updErr) {
+          await logEvent({ category: "invoices", action: "cron.update", status: "error", context: { partnerId, error: updErr.message } });
+          continue;
+        }
+
+        await logEvent({ category: "invoices", action: "cron.issued", status: "success", context: { partnerId, invoiceId } });
+      } catch (e) {
+        await logEvent({ category: "invoices", action: "cron.partner.error", status: "error", context: { partnerId, error: e?.message || String(e) } });
+      }
+    }
+  } catch (e) {
+    await logEvent({ category: "invoices", action: "cron.run.error", status: "error", context: { error: e?.message || String(e) } });
+  } finally {
+    INVOICES_CRON_LOCK = false;
+  }
+}
+
+// Planification: 08:00 (heure serveur) le 1er jour de chaque mois
+cron.schedule("0 8 1 * *", () => { runMonthlyInvoicesCronOnce().catch(() => {}); });
 
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
