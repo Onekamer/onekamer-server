@@ -9960,9 +9960,165 @@ app.get("/api/market/partners/:partnerId/invoices/:invoiceId/pdf", async (req, r
     if (!inv || String(inv.partner_id) !== String(partnerId)) return res.status(404).json({ error: "invoice_not_found" });
     if (!inv.pdf_bucket || !inv.pdf_path) return res.status(400).json({ error: "pdf_not_ready" });
 
-    const { data: signed, error: sErr } = await sb.storage.from(inv.pdf_bucket).createSignedUrl(inv.pdf_path, 120);
+    const { data: signed, error: sErr } = await sb.storage.from(inv.pdf_bucket).createSignedUrl(inv.pdf_path, 600);
     if (sErr) return res.status(500).json({ error: sErr.message || "signed_url_failed" });
     return res.json({ url: signed?.signedUrl || null });
+  } catch (e) {
+    return res.status(500).json({ error: e?.message || "Erreur interne" });
+  }
+});
+
+// Option 2 — Endpoints déduisant la boutique depuis le JWT (owner_user_id)
+// GET /api/market/me/invoices
+app.get("/api/market/me/invoices", async (req, res) => {
+  try {
+    const guard = await requireUserJWT(req);
+    if (!guard.ok) return res.status(guard.status).json({ error: guard.error });
+
+    const sb = getSupabaseClient();
+    const { data: partner, error: pErr } = await sb
+      .from("partners_market")
+      .select("id")
+      .eq("owner_user_id", guard.userId)
+      .maybeSingle();
+    if (pErr) return res.status(500).json({ error: pErr.message || "partner_read_failed" });
+    if (!partner) return res.status(404).json({ error: "no_partner" });
+
+    const partnerId = String(partner.id);
+    const limit = Math.min(Math.max(parseInt(String(req.query.limit || 20), 10), 1), 100);
+    const offset = Math.max(parseInt(String(req.query.offset || 0), 10), 0);
+    const { data, error, count } = await sb
+      .from("market_invoices")
+      .select("id, number, period_start, period_end, currency, total_ht, total_tva, total_ttc, status, issued_at", { count: "exact" })
+      .eq("partner_id", partnerId)
+      .order("issued_at", { ascending: false })
+      .range(offset, offset + limit - 1);
+    if (error) return res.status(500).json({ error: error.message || "invoices_read_failed" });
+    return res.json({ items: Array.isArray(data) ? data : [], count: typeof count === "number" ? count : null, limit, offset });
+  } catch (e) {
+    return res.status(500).json({ error: e?.message || "Erreur interne" });
+  }
+});
+
+// GET /api/market/me/invoices/:invoiceId/pdf — URL signée TTL 600s
+app.get("/api/market/me/invoices/:invoiceId/pdf", async (req, res) => {
+  try {
+    const guard = await requireUserJWT(req);
+    if (!guard.ok) return res.status(guard.status).json({ error: guard.error });
+
+    const { invoiceId } = req.params;
+    const sb = getSupabaseClient();
+    const { data: partner, error: pErr } = await sb
+      .from("partners_market")
+      .select("id")
+      .eq("owner_user_id", guard.userId)
+      .maybeSingle();
+    if (pErr) return res.status(500).json({ error: pErr.message || "partner_read_failed" });
+    if (!partner) return res.status(404).json({ error: "no_partner" });
+
+    const { data: inv, error } = await sb
+      .from("market_invoices")
+      .select("id, partner_id, pdf_bucket, pdf_path")
+      .eq("id", invoiceId)
+      .maybeSingle();
+    if (error) return res.status(500).json({ error: error.message || "invoice_read_failed" });
+    if (!inv || String(inv.partner_id) !== String(partner.id)) return res.status(404).json({ error: "invoice_not_found" });
+    if (!inv.pdf_bucket || !inv.pdf_path) return res.status(400).json({ error: "pdf_not_ready" });
+
+    const { data: signed, error: sErr } = await sb.storage.from(inv.pdf_bucket).createSignedUrl(inv.pdf_path, 600);
+    if (sErr) return res.status(500).json({ error: sErr.message || "signed_url_failed" });
+    return res.json({ url: signed?.signedUrl || null });
+  } catch (e) {
+    return res.status(500).json({ error: e?.message || "Erreur interne" });
+  }
+});
+
+// GET /api/market/me/billing — lecture TVA + adresse de facturation
+app.get("/api/market/me/billing", async (req, res) => {
+  try {
+    const guard = await requireUserJWT(req);
+    if (!guard.ok) return res.status(guard.status).json({ error: guard.error });
+
+    const sb = getSupabaseClient();
+    const { data: partner, error } = await sb
+      .from("partners_market")
+      .select("id, display_name, legal_name, address, country_code, vat_number, vat_validation_status, billing_address_line1, billing_address_line2, billing_city, billing_postcode, billing_region, billing_country_code, billing_email")
+      .eq("owner_user_id", guard.userId)
+      .maybeSingle();
+    if (error) return res.status(500).json({ error: error.message || "partner_read_failed" });
+    if (!partner) return res.status(404).json({ error: "no_partner" });
+
+    return res.json({
+      partner_id: partner.id,
+      vat: {
+        number: partner.vat_number || null,
+        validation_status: partner.vat_validation_status || null,
+        country_code: partner.country_code || null,
+      },
+      billing: {
+        address_line1: partner.billing_address_line1 || null,
+        address_line2: partner.billing_address_line2 || null,
+        city: partner.billing_city || null,
+        postcode: partner.billing_postcode || null,
+        region: partner.billing_region || null,
+        country_code: partner.billing_country_code || null,
+        email: partner.billing_email || null,
+      },
+      shop_address: partner.address || null,
+    });
+  } catch (e) {
+    return res.status(500).json({ error: e?.message || "Erreur interne" });
+  }
+});
+
+// PUT /api/market/me/billing — mise à jour TVA + adresse facturation
+app.put("/api/market/me/billing", bodyParser.json(), async (req, res) => {
+  try {
+    const guard = await requireUserJWT(req);
+    if (!guard.ok) return res.status(guard.status).json({ error: guard.error });
+
+    const {
+      vat_number,
+      vat_validation_status,
+      billing_address_line1,
+      billing_address_line2,
+      billing_city,
+      billing_postcode,
+      billing_region,
+      billing_country_code,
+      billing_email,
+    } = req.body || {};
+
+    const sb = getSupabaseClient();
+    const { data: partner, error: pErr } = await sb
+      .from("partners_market")
+      .select("id")
+      .eq("owner_user_id", guard.userId)
+      .maybeSingle();
+    if (pErr) return res.status(500).json({ error: pErr.message || "partner_read_failed" });
+    if (!partner) return res.status(404).json({ error: "no_partner" });
+
+    const payload = {
+      vat_number: typeof vat_number === "string" ? (vat_number.trim() || null) : undefined,
+      vat_validation_status: typeof vat_validation_status === "string" ? (vat_validation_status.trim() || null) : undefined,
+      billing_address_line1: typeof billing_address_line1 === "string" ? (billing_address_line1.trim() || null) : undefined,
+      billing_address_line2: typeof billing_address_line2 === "string" ? (billing_address_line2.trim() || null) : undefined,
+      billing_city: typeof billing_city === "string" ? (billing_city.trim() || null) : undefined,
+      billing_postcode: typeof billing_postcode === "string" ? (billing_postcode.trim() || null) : undefined,
+      billing_region: typeof billing_region === "string" ? (billing_region.trim() || null) : undefined,
+      billing_country_code: typeof billing_country_code === "string" ? (billing_country_code.trim().toUpperCase() || null) : undefined,
+      billing_email: typeof billing_email === "string" ? (billing_email.trim().toLowerCase() || null) : undefined,
+      updated_at: new Date().toISOString(),
+    };
+    Object.keys(payload).forEach((k) => payload[k] === undefined && delete payload[k]);
+
+    const { error: uErr } = await sb
+      .from("partners_market")
+      .update(payload)
+      .eq("id", partner.id);
+    if (uErr) return res.status(500).json({ error: uErr.message || "partner_update_failed" });
+
+    return res.json({ ok: true });
   } catch (e) {
     return res.status(500).json({ error: e?.message || "Erreur interne" });
   }
