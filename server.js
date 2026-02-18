@@ -907,13 +907,13 @@ function formatMoneyCents(amountCents) {
 async function buildInvoicePdfBuffer({ invoice, partner, lines }) {
   return await new Promise((resolve, reject) => {
     try {
-      const doc = new PDFDocument({ size: "A4", margin: 50 });
+      const doc = new PDFDocument({ size: "A4", margin: 50, bufferPages: true });
       const chunks = [];
       doc.on("data", (b) => chunks.push(b));
       doc.on("end", () => resolve(Buffer.concat(chunks)));
-      // En‑tête simplifié sans bandeau
+      // En‑tête simplifié; le header/footer final sera dessiné pour chaque page après le contenu
       doc.fillColor("#000");
-      doc.moveDown(2);
+      try { doc.y = 100; } catch {}
       doc.fontSize(20).text("FACTURE", { align: "right" });
       doc.moveDown(0.5);
       doc.fontSize(10).text(`N°: ${invoice.number}`, { align: "right" });
@@ -951,10 +951,76 @@ async function buildInvoicePdfBuffer({ invoice, partner, lines }) {
       doc.font("Helvetica");
       if (invoice.vat_note) doc.moveDown(1).fontSize(9).text(invoice.vat_note, { align: "left" });
 
-      // Pied d’info (texte simple, pas de bandeau)
-      doc.moveDown(2);
-      doc.fontSize(8).fillColor("#444").text("ONEKAMER SAS — 60 Rue François 1er - 75008 Paris", { align: "center" });
-      doc.text("Email : contact@onekamer.co — SIREN 991 019 720 — TVA FR 54991019720", { align: "center" });
+      // Dessiner header/footer et pagination sur chaque page
+      try {
+        // Charger le logo (PNG) depuis BunnyCDN
+        const logoUrl = "https://onekamer-media-cdn.b-cdn.net/logo/IMG_0885%202.PNG";
+        let logoBuf = null;
+        try {
+          const r = await fetch(logoUrl);
+          if (r && r.ok) {
+            const ab = await r.arrayBuffer();
+            logoBuf = Buffer.from(ab);
+          }
+        } catch {}
+
+        const range = doc.bufferedPageRange();
+        for (let i = 0; i < range.count; i++) {
+          doc.switchToPage(range.start + i);
+          const { width, height, margins } = doc.page;
+
+          // Header: logo à gauche + ligne verte
+          const headerY = 28;
+          const headerLineY = 80;
+          if (logoBuf) {
+            try { doc.image(logoBuf, margins.left, headerY, { width: 90 }); } catch {}
+          }
+          doc.save()
+            .lineWidth(2)
+            .strokeColor("#2BA84A")
+            .moveTo(margins.left, headerLineY)
+            .lineTo(width - margins.right, headerLineY)
+            .stroke()
+            .restore();
+
+          // Footer: ligne verte, infos légales, barres couleurs, pagination
+          const footerTopY = height - margins.bottom - 60; // zone d'infos
+          const footerLineY = footerTopY - 10;
+          doc.save()
+            .lineWidth(2)
+            .strokeColor("#2BA84A")
+            .moveTo(margins.left, footerLineY)
+            .lineTo(width - margins.right, footerLineY)
+            .stroke()
+            .restore();
+
+          // Infos légales centrées
+          const legalBlockY = footerTopY;
+          const legalW = width - margins.left - margins.right;
+          doc.fontSize(8).fillColor("#000");
+          doc.text("ONEKAMER SAS", margins.left, legalBlockY, { width: legalW, align: "center" });
+          doc.text("60 Rue François 1er - 75008 Paris", margins.left, undefined, { width: legalW, align: "center" });
+          doc.text("Email : contact@onekamer.co", margins.left, undefined, { width: legalW, align: "center" });
+          doc.text("SAS au capital social de 2,00€", margins.left, undefined, { width: legalW, align: "center" });
+          doc.text("SIREN 991 019 720 — TVA FR 54991019720", margins.left, undefined, { width: legalW, align: "center" });
+
+          // Pagination en bas droite (au-dessus des barres)
+          const pageNumText = `Page ${i + 1}/${range.count}`;
+          doc.fontSize(8).fillColor("#000").text(pageNumText, width - margins.right - 60, height - margins.bottom - 20, { width: 60, align: "right" });
+
+          // Barres couleurs en bas
+          const greenH = 10;
+          const greenY = height - greenH; // barre verte pleine largeur
+          doc.save().rect(0, greenY, width, greenH).fill("#2BA84A").restore();
+          const accentH = 4;
+          const accentY = greenY - 4;
+          const redW = 80;
+          const yellowW = 80;
+          doc.save().rect((width / 2) - (redW / 2), accentY, redW, accentH).fill("#D62828").restore();
+          doc.save().rect(width - yellowW - 16, accentY, yellowW, accentH).fill("#FFC107").restore();
+        }
+      } catch {}
+
       doc.end();
     } catch (e) {
       reject(e);
