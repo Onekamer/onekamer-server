@@ -982,7 +982,7 @@ async function buildInvoicePdfBuffer({ invoice, partner, lines }) {
           try {
             doc.font("Helvetica-Bold").fontSize(brandFontSize).fillColor("#000");
             const brandX = margins.left + logoW + gap;
-            const brandY = headerY + 18;
+            const brandY = headerY + 24; // légèrement plus bas pour aligner au milieu du K
             doc.text(brandText, brandX, brandY);
           } catch {}
           // Ligne verte démarrant après le logo (et le texte)
@@ -1030,15 +1030,14 @@ async function buildInvoicePdfBuffer({ invoice, partner, lines }) {
           // Barres couleurs en bas — 3 segments juxtaposés: vert, puis rouge, puis jaune
           const barH = 10;
           const barY = height - barH;
-          const redW = Math.max(80, Math.min(180, Math.round(width * 0.16)));
-          const yellowW = Math.max(80, Math.min(180, Math.round(width * 0.14)));
-          const greenW = Math.max(0, width - redW - yellowW);
+          const segW = Math.floor(width / 3);
+          const lastW = width - segW * 2; // pour absorber l'arrondi
           // Vert (gauche)
-          doc.save().rect(0, barY, greenW, barH).fill("#2BA84A").restore();
-          // Rouge (au milieu, juxtaposé à droite du vert)
-          doc.save().rect(greenW, barY, redW, barH).fill("#D62828").restore();
+          doc.save().rect(0, barY, segW, barH).fill("#2BA84A").restore();
+          // Rouge (milieu)
+          doc.save().rect(segW, barY, segW, barH).fill("#D62828").restore();
           // Jaune (droite)
-          doc.save().rect(greenW + redW, barY, yellowW, barH).fill("#FFC107").restore();
+          doc.save().rect(segW * 2, barY, lastW, barH).fill("#FFC107").restore();
         }
       } catch {}
 
