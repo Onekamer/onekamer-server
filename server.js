@@ -905,7 +905,7 @@ function formatMoneyCents(amountCents) {
 }
 
 async function buildInvoicePdfBuffer({ invoice, partner, lines }) {
-  return await new Promise((resolve, reject) => {
+  return await new Promise(async (resolve, reject) => {
     try {
       const doc = new PDFDocument({ size: "A4", margin: 50, bufferPages: true });
       const chunks = [];
