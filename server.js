@@ -21,6 +21,7 @@ import admin from "firebase-admin";
 import apn from "apn";
 import qrcodeRouter from "./api/qrcode.js";
 import iapRouter from "./api/iap.js";
+import streamRouter from "./api/stream.js";
 import cron from "node-cron";
 import { createFxService } from "./utils/fx.js";
 import PDFDocument from "pdfkit";
@@ -800,6 +801,7 @@ app.use("/api", fixEvenementsImagesRoute);
 app.use("/api", pushRouter);
 app.use("/api", qrcodeRouter);
 app.use("/api", iapRouter);
+app.use("/api", streamRouter);
 
 // ============================================================
 // 🔑 Stripe
