@@ -9068,6 +9068,203 @@ app.post("/api/push/unregister-device", (req, res, next) => {
 });
 
 // ============================================================
+// 📣 Sponsorisation — Plans, Posts, Admin, Draft Orders
+// ============================================================
+
+// Plans actifs (public)
+app.get("/api/sponsor/plans", async (req, res) => {
+  try {
+    const { data, error } = await supabase
+      .from("sponsored_plans")
+      .select("id, key, name, duration_days, pinned, price_cents, currency, iap_product_id, active")
+      .eq("active", true)
+      .order("price_cents", { ascending: true });
+    if (error) return res.status(500).json({ error: error.message || "Erreur lecture plans" });
+    return res.json({ items: Array.isArray(data) ? data : [] });
+  } catch (e) {
+    return res.status(500).json({ error: e?.message || "Erreur interne" });
+  }
+});
+
+// Créer un post sponsorisé (brouillon en revue)
+app.post("/api/sponsor/posts", bodyParser.json(), async (req, res) => {
+  try {
+    const guard = await requireUserJWT(req);
+    if (!guard.ok) return res.status(guard.status).json({ error: guard.error });
+    const userId = guard.userId;
+    const title = String(req.body?.title || "").trim();
+    const body = req.body?.body != null ? String(req.body.body) : null;
+    const media = req.body?.media && typeof req.body.media === "object" ? req.body.media : null;
+    const planId = req.body?.plan_id ? String(req.body.plan_id) : null;
+    if (!title || title.length < 3) return res.status(400).json({ error: "title_requis" });
+    if (!planId) return res.status(400).json({ error: "plan_id_requis" });
+    const { data: plan, error: pErr } = await supabase
+      .from("sponsored_plans")
+      .select("id, active")
+      .eq("id", planId)
+      .maybeSingle();
+    if (pErr) return res.status(500).json({ error: pErr.message || "Erreur lecture plan" });
+    if (!plan || plan.active !== true) return res.status(400).json({ error: "plan_invalide" });
+    const nowIso = new Date().toISOString();
+    const insertObj = {
+      author_id: userId,
+      title,
+      body,
+      media,
+      plan_id: planId,
+      status: "pending_review",
+      created_at: nowIso,
+      updated_at: nowIso,
+    };
+    const { data: inserted, error: insErr } = await supabase
+      .from("sponsored_posts")
+      .insert(insertObj)
+      .select("id, author_id, title, status, plan_id, created_at")
+      .single();
+    if (insErr) return res.status(500).json({ error: insErr.message || "insert_failed" });
+    return res.status(201).json({ post: inserted });
+  } catch (e) {
+    return res.status(500).json({ error: e?.message || "Erreur interne" });
+  }
+});
+
+// Mes posts sponsorisés (optionnel status=...)
+app.get("/api/sponsor/my-posts", async (req, res) => {
+  try {
+    const guard = await requireUserJWT(req);
+    if (!guard.ok) return res.status(guard.status).json({ error: guard.error });
+    const userId = guard.userId;
+    const status = req.query?.status ? String(req.query.status).trim() : "";
+    let q = supabase
+      .from("sponsored_posts")
+      .select("id, title, status, plan_id, start_at, end_at, created_at, updated_at")
+      .eq("author_id", userId)
+      .order("created_at", { ascending: false });
+    if (status) q = q.eq("status", status);
+    const { data, error } = await q;
+    if (error) return res.status(500).json({ error: error.message || "Erreur lecture" });
+    return res.json({ items: Array.isArray(data) ? data : [] });
+  } catch (e) {
+    return res.status(500).json({ error: e?.message || "Erreur interne" });
+  }
+});
+
+// Admin: lister posts par statut
+app.get("/api/sponsor/admin/posts", async (req, res) => {
+  try {
+    const verif = await verifyIsAdminJWT(req);
+    if (!verif.ok) {
+      const status = verif.reason === "forbidden" ? 403 : 401;
+      return res.status(status).json({ error: verif.reason });
+    }
+    const status = req.query?.status ? String(req.query.status).trim() : "";
+    let q = supabase
+      .from("sponsored_posts")
+      .select("id, author_id, title, status, plan_id, created_at")
+      .order("created_at", { ascending: false });
+    if (status) q = q.eq("status", status);
+    const { data, error } = await q;
+    if (error) return res.status(500).json({ error: error.message || "Erreur lecture admin" });
+    return res.json({ items: Array.isArray(data) ? data : [] });
+  } catch (e) {
+    return res.status(500).json({ error: e?.message || "Erreur interne" });
+  }
+});
+
+// Admin: approuver / rejeter
+app.post("/api/sponsor/posts/:id/approve", async (req, res) => {
+  try {
+    const verif = await verifyIsAdminJWT(req);
+    if (!verif.ok) {
+      const status = verif.reason === "forbidden" ? 403 : 401;
+      return res.status(status).json({ error: verif.reason });
+    }
+    const id = req.params.id;
+    if (!id) return res.status(400).json({ error: "id requis" });
+    const nowIso = new Date().toISOString();
+    const { error: upErr } = await supabase
+      .from("sponsored_posts")
+      .update({ status: "approved", approved_by: verif.userId || null, approved_at: nowIso, updated_at: nowIso })
+      .eq("id", id);
+    if (upErr) return res.status(500).json({ error: upErr.message || "update_failed" });
+    return res.json({ ok: true });
+  } catch (e) {
+    return res.status(500).json({ error: e?.message || "Erreur interne" });
+  }
+});
+
+app.post("/api/sponsor/posts/:id/reject", async (req, res) => {
+  try {
+    const verif = await verifyIsAdminJWT(req);
+    if (!verif.ok) {
+      const status = verif.reason === "forbidden" ? 403 : 401;
+      return res.status(status).json({ error: verif.reason });
+    }
+    const id = req.params.id;
+    if (!id) return res.status(400).json({ error: "id requis" });
+    const nowIso = new Date().toISOString();
+    const { error: upErr } = await supabase
+      .from("sponsored_posts")
+      .update({ status: "rejected", approved_by: verif.userId || null, approved_at: nowIso, updated_at: nowIso })
+      .eq("id", id);
+    if (upErr) return res.status(500).json({ error: upErr.message || "update_failed" });
+    return res.json({ ok: true });
+  } catch (e) {
+    return res.status(500).json({ error: e?.message || "Erreur interne" });
+  }
+});
+
+// Brouillon de commande (sans paiement)
+app.post("/api/sponsor/orders/:postId/draft", bodyParser.json(), async (req, res) => {
+  try {
+    const guard = await requireUserJWT(req);
+    if (!guard.ok) return res.status(guard.status).json({ error: guard.error });
+    const userId = guard.userId;
+    const postId = req.params.postId;
+    if (!postId) return res.status(400).json({ error: "postId requis" });
+    const providerRaw = String(req.body?.provider || "stripe").toLowerCase();
+    const provider = providerRaw === "iap" ? "iap" : "stripe";
+    const { data: post, error: pErr } = await supabase
+      .from("sponsored_posts")
+      .select("id, author_id, plan_id, status")
+      .eq("id", postId)
+      .maybeSingle();
+    if (pErr) return res.status(500).json({ error: pErr.message || "Erreur lecture post" });
+    if (!post) return res.status(404).json({ error: "post_not_found" });
+    if (String(post.author_id) !== String(userId)) return res.status(403).json({ error: "forbidden" });
+    if (String(post.status || "").toLowerCase() !== "approved") return res.status(400).json({ error: "post_not_approved" });
+    const { data: plan, error: planErr } = await supabase
+      .from("sponsored_plans")
+      .select("id, price_cents, currency")
+      .eq("id", post.plan_id)
+      .maybeSingle();
+    if (planErr) return res.status(500).json({ error: planErr.message || "Erreur lecture plan" });
+    if (!plan) return res.status(400).json({ error: "plan_not_found" });
+    const nowIso = new Date().toISOString();
+    const orderObj = {
+      user_id: userId,
+      post_id: postId,
+      plan_id: plan.id,
+      provider,
+      status: "pending",
+      amount_cents: Number(plan.price_cents || 0),
+      currency: String(plan.currency || "eur").toLowerCase(),
+      created_at: nowIso,
+      updated_at: nowIso,
+    };
+    const { data: order, error: oErr } = await supabase
+      .from("sponsored_orders")
+      .insert(orderObj)
+      .select("id, status, amount_cents, currency, provider")
+      .single();
+    if (oErr) return res.status(500).json({ error: oErr.message || "order_insert_failed" });
+    return res.json({ order });
+  } catch (e) {
+    return res.status(500).json({ error: e?.message || "Erreur interne" });
+  }
+});
+
+// ============================================================
 // 👥 Groupes — Demandes d'adhésion (join-request / approve / deny)
 // ============================================================
 
