@@ -2,9 +2,18 @@ import express from "express";
 import multer from "multer";
 import mime from "mime-types";
 import { createClient } from "@supabase/supabase-js";
+import fs from "fs";
 
 const router = express.Router();
-const upload = multer();
+const storage = multer.diskStorage({
+  destination: (req, file, cb) => cb(null, "/tmp"),
+  filename: (req, file, cb) => {
+    const ext = mime.extension(file.mimetype || "application/octet-stream") || "bin";
+    const originalName = (file.originalname?.replace(/\s+/g, "_") || `upload.${ext}`);
+    cb(null, `${Date.now()}_${originalName}`);
+  },
+});
+const upload = multer({ storage });
 
 // ✅ Initialisation paresseuse de Supabase (pour synchroniser les fichiers "rencontres")
 // On évite de faire planter tout le serveur au démarrage si les variables d'env sont absentes.
@@ -103,15 +112,20 @@ router.post("/upload", upload.single("file"), async (req, res) => {
     console.log("📁 Upload vers:", uploadPath, "| Type:", mimeType);
 
     // 🚀 Upload vers Bunny Storage
-    const response = await fetch(
-      `https://storage.bunnycdn.com/${process.env.BUNNY_STORAGE_ZONE}/${uploadPath}`,
+    const tmpPath = file.path; // multer diskStorage path
+    const fileSize = file.size;
+    const stream = fs.createReadStream(tmpPath);
+    const response = await fetch(`https://storage.bunnycdn.com/${process.env.BUNNY_STORAGE_ZONE}/${uploadPath}`,
       {
         method: "PUT",
         headers: {
           AccessKey: process.env.BUNNY_ACCESS_KEY,
           "Content-Type": mimeType,
+          ...(fileSize ? { "Content-Length": String(fileSize) } : {}),
         },
-        body: file.buffer,
+        // Node.js fetch nécessite duplex pour corps stream
+        duplex: 'half',
+        body: stream,
       }
     );
 
@@ -128,9 +142,10 @@ router.post("/upload", upload.single("file"), async (req, res) => {
     if (safeFolder === "rencontres") {
       try {
         const supabaseClient = getSupabaseClient();
+        const buffer = await fs.promises.readFile(tmpPath);
         const { error: supabaseError } = await supabaseClient.storage
           .from("rencontres")
-          .upload(uploadPath, file.buffer, {
+          .upload(uploadPath, buffer, {
             contentType: mimeType,
             upsert: true,
           });
@@ -150,6 +165,9 @@ router.post("/upload", upload.single("file"), async (req, res) => {
       mimeType,
       message: `✅ Upload réussi vers ${cdnUrl}`,
     });
+    // Nettoyage du fichier temporaire
+    try { if (file?.path) await fs.promises.unlink(file.path); } catch {}
+    
   } catch (err) {
     console.error("❌ Erreur upload:", err.message);
     return res.status(500).json({
