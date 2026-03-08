@@ -3,6 +3,7 @@ import multer from "multer";
 import mime from "mime-types";
 import { createClient } from "@supabase/supabase-js";
 import fs from "fs";
+import Busboy from "busboy";
 
 const router = express.Router();
 const storage = multer.diskStorage({
@@ -37,19 +38,12 @@ function getSupabaseClient() {
 }
 
 // 🟢 Route universelle d’upload vers BunnyCDN
-router.post("/upload", upload.single("file"), async (req, res) => {
+router.post("/upload", async (req, res) => {
   try {
-    // ✅ Compatibilité étendue avec anciens et nouveaux champs
-    const folder = req.body.folder || req.body.type || "misc";
-    const userId = req.body.user_id || req.body.userId || req.body.recordId;
-    const file = req.file;
-
-    // 🧩 Vérification basique
-    if (!file) {
-      return res.status(400).json({ error: "Aucun fichier reçu." });
+    if (!req.headers["content-type"] || !/multipart\/form-data/i.test(req.headers["content-type"])) {
+      return res.status(400).json({ success: false, error: "Content-Type invalide (multipart/form-data requis)" });
     }
 
-    // ✅ Whitelist des dossiers autorisés
     const allowedFolders = [
       "avatars",
       "posts",
@@ -57,18 +51,13 @@ router.post("/upload", upload.single("file"), async (req, res) => {
       "marketplace_items",
       "annonces",
       "evenements",
-      "comments_audio", // ajouté pour les audios
+      "comments_audio",
       "comments",
       "misc",
       "groupes",
       "faits_divers",
       "rencontres",
     ];
-    if (!allowedFolders.includes(folder)) {
-      return res.status(400).json({ error: `Dossier non autorisé: ${folder}` });
-    }
-
-    // ✅ Types MIME autorisés
     const ALLOWED_AUDIO_TYPES = [
       "audio/webm",
       "audio/mpeg",
@@ -79,102 +68,89 @@ router.post("/upload", upload.single("file"), async (req, res) => {
       "audio/x-aac",
     ];
 
-    // 🧠 Détection propre du mimetype + extension
-    const mimeType = file.mimetype || "application/octet-stream";
-    const ext = mime.extension(mimeType) || "bin";
+    let folder = "misc";
+    let userId = null;
+    let fileHandled = false;
+    let uploadPath = null;
+    let mimeType = null;
+    let cdnUrl = null;
+    let safeFolder = null;
 
-    // 🛑 Vérification du type de fichier
-    const isImage = mimeType.startsWith("image/");
-    const isVideo = mimeType.startsWith("video/");
-    const isAudio = ALLOWED_AUDIO_TYPES.includes(mimeType);
+    const busboy = Busboy({ headers: req.headers, limits: { fields: 32 } });
 
-    if (!isImage && !isVideo && !isAudio) {
-      return res.status(400).json({
-        success: false,
-        message: `Type de fichier non pris en charge (${mimeType}).`,
+    const done = new Promise((resolve, reject) => {
+      busboy.on("field", (name, val) => {
+        if (name === "folder" || name === "type") folder = String(val || "").trim() || "misc";
+        if (name === "user_id" || name === "userId" || name === "recordId") userId = String(val || "").trim();
       });
-    }
 
-    // 🔧 Nom de fichier sûr et unique
-    const originalName =
-      file.originalname?.replace(/\s+/g, "_") || `upload.${ext}`;
-    const fileName = `${Date.now()}_${originalName}`;
-    const safeFolder = allowedFolders.includes(folder) ? folder : "misc";
+      busboy.on("file", (name, file, info) => {
+        if (fileHandled) { file.resume(); return; }
+        fileHandled = true;
+        const { filename, mimeType: mm, mime: legacyMime, encoding } = info || {};
+        mimeType = mm || legacyMime || "application/octet-stream";
 
-    // ✅ Organisation: pour "rencontres", on crée un sous-dossier par utilisateur (comme LAB)
-    let uploadPath;
-    if (safeFolder === "rencontres" && userId) {
-      uploadPath = `${safeFolder}/${userId}/${fileName}`;
-    } else {
-      uploadPath = `${safeFolder}/${fileName}`;
-    }
+        const isImage = /^image\//i.test(mimeType);
+        const isVideo = /^video\//i.test(mimeType);
+        const isAudio = ALLOWED_AUDIO_TYPES.includes(mimeType);
+        if (!isImage && !isVideo && !isAudio) {
+          file.resume();
+          return reject(new Error(`Type de fichier non pris en charge (${mimeType}).`));
+        }
 
-    console.log("📁 Upload vers:", uploadPath, "| Type:", mimeType);
+        const ext = mime.extension(mimeType) || "bin";
+        const originalName = (filename || `upload.${ext}`).replace(/\s+/g, "_");
+        const fileName = `${Date.now()}_${originalName}`;
+        safeFolder = allowedFolders.includes(folder) ? folder : "misc";
+        uploadPath = (safeFolder === "rencontres" && userId) ? `${safeFolder}/${userId}/${fileName}` : `${safeFolder}/${fileName}`;
 
-    // 🚀 Upload vers Bunny Storage
-    const tmpPath = file.path; // multer diskStorage path
-    const fileSize = file.size;
-    const stream = fs.createReadStream(tmpPath);
-    const response = await fetch(`https://storage.bunnycdn.com/${process.env.BUNNY_STORAGE_ZONE}/${uploadPath}`,
-      {
-        method: "PUT",
-        headers: {
+        console.log("📁 Upload (pass-through) vers:", uploadPath, "| Type:", mimeType, "| Enc:", encoding || "-");
+
+        const bunnyUrl = `https://storage.bunnycdn.com/${process.env.BUNNY_STORAGE_ZONE}/${uploadPath}`;
+        const headers = {
           AccessKey: process.env.BUNNY_ACCESS_KEY,
           "Content-Type": mimeType,
-          ...(fileSize ? { "Content-Length": String(fileSize) } : {}),
-        },
-        // Node.js fetch nécessite duplex pour corps stream
-        duplex: 'half',
-        body: stream,
-      }
-    );
+        };
 
-    if (!response.ok) {
-      const errorText = await response.text();
-      console.error("❌ Erreur BunnyCDN:", errorText);
-      throw new Error(`Échec de l’upload sur BunnyCDN (${response.status})`);
-    }
+        // Pass-through: on streame directement le flux entrant vers Bunny
+        fetch(bunnyUrl, { method: "PUT", headers, body: file, duplex: "half" })
+          .then(async (resp) => {
+            if (!resp.ok) {
+              const t = await resp.text().catch(() => "");
+              throw new Error(`Échec de l’upload sur BunnyCDN (${resp.status}): ${t}`);
+            }
+            cdnUrl = `${process.env.BUNNY_CDN_URL}/${uploadPath}`;
+            resolve();
+          })
+          .catch((err) => reject(err));
+      });
 
-    // 🌍 URL finale (CDN public)
-    let cdnUrl = `${process.env.BUNNY_CDN_URL}/${uploadPath}`;
+      busboy.on("error", (e) => reject(e));
+      busboy.on("finish", () => { if (!fileHandled) reject(new Error("Aucun fichier reçu.")); });
+    });
 
-    // 🪄 Synchronisation dans Supabase pour permettre les URLs signées côté front
-    if (safeFolder === "rencontres") {
+    req.pipe(busboy);
+    await done;
+
+    // Optionnel: synchro Supabase uniquement pour rencontres et images (évite un second transfert lourd)
+    if (safeFolder === "rencontres" && mimeType && /^image\//i.test(mimeType)) {
       try {
         const supabaseClient = getSupabaseClient();
-        const buffer = await fs.promises.readFile(tmpPath);
+        const r = await fetch(cdnUrl);
+        const ab = await r.arrayBuffer();
         const { error: supabaseError } = await supabaseClient.storage
           .from("rencontres")
-          .upload(uploadPath, buffer, {
-            contentType: mimeType,
-            upsert: true,
-          });
-        if (supabaseError) {
-          console.warn("⚠️ Upload Bunny réussi, mais échec Supabase :", supabaseError.message);
-        }
+          .upload(uploadPath, new Uint8Array(ab), { contentType: mimeType, upsert: true });
+        if (supabaseError) console.warn("⚠️ Upload Bunny réussi, mais échec Supabase :", supabaseError.message);
       } catch (syncErr) {
         console.warn("⚠️ Erreur de synchronisation Supabase :", syncErr.message);
       }
     }
 
-    // ✅ Succès
-    return res.status(200).json({
-      success: true,
-      url: cdnUrl,
-      path: uploadPath,
-      mimeType,
-      message: `✅ Upload réussi vers ${cdnUrl}`,
-    });
-    // Nettoyage du fichier temporaire
-    try { if (file?.path) await fs.promises.unlink(file.path); } catch {}
-    
+    return res.status(200).json({ success: true, url: cdnUrl, path: uploadPath, mimeType, message: `✅ Upload réussi vers ${cdnUrl}` });
   } catch (err) {
     console.error("❌ Erreur upload:", err.message);
-    return res.status(500).json({
-      success: false,
-      error: err.message,
-      hint: "Vérifie ta clé BunnyCDN, ton dossier autorisé, et le Content-Type.",
-    });
+    return res.status(500).json({ success: false, error: err.message, hint: "Vérifie ta clé BunnyCDN, ton dossier autorisé, et le Content-Type." });
   }
 });
 
