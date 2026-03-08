@@ -6,38 +6,25 @@ import fs from "fs";
 import Busboy from "busboy";
 
 const router = express.Router();
-const storage = multer.diskStorage({
-  destination: (req, file, cb) => cb(null, "/tmp"),
-  filename: (req, file, cb) => {
-    const ext = mime.extension(file.mimetype || "application/octet-stream") || "bin";
-    const originalName = (file.originalname?.replace(/\s+/g, "_") || `upload.${ext}`);
-    cb(null, `${Date.now()}_${originalName}`);
-  },
-});
-const upload = multer({ storage });
 
 // ✅ Initialisation paresseuse de Supabase (pour synchroniser les fichiers "rencontres")
 // On évite de faire planter tout le serveur au démarrage si les variables d'env sont absentes.
 let supabase = null;
-
 function getSupabaseClient() {
   if (!supabase) {
     const url = process.env.SUPABASE_URL;
     const serviceKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
-
     if (!url || !serviceKey) {
       throw new Error(
         "SUPABASE_URL ou SUPABASE_SERVICE_ROLE_KEY manquant(e) pour la synchronisation des fichiers 'rencontres'"
       );
     }
-
     supabase = createClient(url, serviceKey);
   }
-
   return supabase;
 }
 
-// 🟢 Route universelle d’upload vers BunnyCDN
+// 🟢 Route universelle d’upload vers BunnyCDN (hybride)
 router.post("/upload", async (req, res) => {
   try {
     if (!req.headers["content-type"] || !/multipart\/form-data/i.test(req.headers["content-type"])) {
@@ -104,7 +91,7 @@ router.post("/upload", async (req, res) => {
         safeFolder = allowedFolders.includes(folder) ? folder : "misc";
         uploadPath = (safeFolder === "rencontres" && userId) ? `${safeFolder}/${userId}/${fileName}` : `${safeFolder}/${fileName}`;
 
-        console.log("📁 Upload (pass-through) vers:", uploadPath, "| Type:", mimeType, "| Enc:", encoding || "-");
+        console.log("📁 Upload vers:", uploadPath, "| Type:", mimeType, "| Enc:", encoding || "-");
 
         const bunnyUrl = `https://storage.bunnycdn.com/${process.env.BUNNY_STORAGE_ZONE}/${uploadPath}`;
         const headers = {
@@ -112,17 +99,44 @@ router.post("/upload", async (req, res) => {
           "Content-Type": mimeType,
         };
 
-        // Pass-through: on streame directement le flux entrant vers Bunny
-        fetch(bunnyUrl, { method: "PUT", headers, body: file, duplex: "half" })
-          .then(async (resp) => {
-            if (!resp.ok) {
-              const t = await resp.text().catch(() => "");
-              throw new Error(`Échec de l’upload sur BunnyCDN (${resp.status}): ${t}`);
+        // Stratégie hybride: pass-through pour images/audio; fallback disque + Content-Length pour vidéos
+        if (isVideo) {
+          const tmpPath = `/tmp/${fileName}`;
+          const write = fs.createWriteStream(tmpPath);
+          const cleanup = async () => { try { await fs.promises.unlink(tmpPath); } catch {} };
+          file.pipe(write);
+          write.on("error", async (e) => { await cleanup(); reject(e); });
+          file.on("error", async (e) => { await cleanup(); reject(e); });
+          write.on("finish", async () => {
+            try {
+              const stat = await fs.promises.stat(tmpPath);
+              const stream = fs.createReadStream(tmpPath);
+              const resp = await fetch(bunnyUrl, { method: "PUT", headers: { ...headers, "Content-Length": String(stat.size) }, duplex: "half", body: stream });
+              if (!resp.ok) {
+                const t = await resp.text().catch(() => "");
+                throw new Error(`Échec de l’upload sur BunnyCDN (${resp.status}): ${t}`);
+              }
+              cdnUrl = `${process.env.BUNNY_CDN_URL}/${uploadPath}`;
+              await cleanup();
+              resolve();
+            } catch (err) {
+              await cleanup();
+              reject(err);
             }
-            cdnUrl = `${process.env.BUNNY_CDN_URL}/${uploadPath}`;
-            resolve();
-          })
-          .catch((err) => reject(err));
+          });
+        } else {
+          // Pass-through direct pour images/audio
+          fetch(bunnyUrl, { method: "PUT", headers, body: file, duplex: "half" })
+            .then(async (resp) => {
+              if (!resp.ok) {
+                const t = await resp.text().catch(() => "");
+                throw new Error(`Échec de l’upload sur BunnyCDN (${resp.status}): ${t}`);
+              }
+              cdnUrl = `${process.env.BUNNY_CDN_URL}/${uploadPath}`;
+              resolve();
+            })
+            .catch((err) => reject(err));
+        }
       });
 
       busboy.on("error", (e) => reject(e));
@@ -155,3 +169,4 @@ router.post("/upload", async (req, res) => {
 });
 
 export default router;
+
