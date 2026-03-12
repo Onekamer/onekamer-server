@@ -25,6 +25,7 @@ import streamRouter from "./api/stream.js";
 import cron from "node-cron";
 import { createFxService } from "./utils/fx.js";
 import PDFDocument from "pdfkit";
+import http from "http";
 
 // ✅ Correction : utiliser le fetch natif de Node 18+ (pas besoin d'import)
 const fetch = globalThis.fetch;
@@ -10503,6 +10504,10 @@ async function runMonthlyInvoicesCronOnce() {
 cron.schedule("0 8 1 * *", () => { runMonthlyInvoicesCronOnce().catch(() => {}); });
 
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => {
-  console.log(`🚀 Serveur OneKamer actif sur port ${PORT}`);
+const server = http.createServer(app);
+try { server.requestTimeout = 600000; } catch {}
+try { server.headersTimeout = 600000; } catch {}
+try { server.keepAliveTimeout = 600000; } catch {}
+server.listen(PORT, () => {
+  console.log(`🚀 Serveur OneKamer actif sur port ${PORT} (timeouts étendus)`);
 });
