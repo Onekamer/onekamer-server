@@ -6090,6 +6090,23 @@ const APNS_PRIVATE_KEY = process.env.APNS_PRIVATE_KEY;
 const APNS_ENV = (process.env.APNS_ENV || "sandbox").toLowerCase();
 
 let apnProvider = null;
+let apnProviders = {};
+
+function getApnProviderByEnv(env) {
+  const mode = String(env || 'production').toLowerCase();
+  if (apnProviders[mode]) return apnProviders[mode];
+  if (!APNS_TEAM_ID || !APNS_KEY_ID || !APNS_BUNDLE_ID || !APNS_PRIVATE_KEY) {
+    return null;
+  }
+  const key = APNS_PRIVATE_KEY.includes("\\n") ? APNS_PRIVATE_KEY.replace(/\\n/g, "\n") : APNS_PRIVATE_KEY;
+  const provider = new apn.Provider({
+    token: { key, keyId: APNS_KEY_ID, teamId: APNS_TEAM_ID },
+    production: mode === 'production',
+  });
+  apnProviders[mode] = provider;
+  return provider;
+}
+
 function getApnProvider() {
   if (apnProvider) return apnProvider;
   if (!APNS_TEAM_ID || !APNS_KEY_ID || !APNS_BUNDLE_ID || !APNS_PRIVATE_KEY) {
@@ -6106,7 +6123,7 @@ function getApnProvider() {
 async function sendApnsToUsers({ targetUserIds = [], title = "OneKamer", message = "", url = "/", data = {} }) {
   if (!Array.isArray(targetUserIds) || targetUserIds.length === 0) return { sent: 0, tokens: 0 };
   const provider = getApnProvider();
-  if (!provider) return { sent: 0, tokens: 0, skipped: "apns_not_configured" };
+  if (!provider && APNS_ENV !== 'auto') return { sent: 0, tokens: 0, skipped: "apns_not_configured" };
 
   const { data: rows, error } = await supabase
     .from("device_push_tokens")
@@ -6130,11 +6147,32 @@ async function sendApnsToUsers({ targetUserIds = [], title = "OneKamer", message
     note.pushType = "alert";
     note.priority = 10;
     note.payload = { data, url };
-    try {
-      const result = await provider.send(note, t);
-      sent += result?.sent?.length || 0;
-    } catch (_e) {
-      // best-effort
+
+    if (APNS_ENV === 'auto') {
+      const prod = getApnProviderByEnv('production');
+      const sbx = getApnProviderByEnv('sandbox');
+      let done = false;
+      try {
+        if (prod) {
+          const r1 = await prod.send(note, t);
+          const c1 = r1?.sent?.length || 0;
+          if (c1 > 0) { sent += c1; done = true; }
+        }
+      } catch (_) {}
+      if (!done) {
+        try {
+          if (sbx) {
+            const r2 = await sbx.send(note, t);
+            const c2 = r2?.sent?.length || 0;
+            if (c2 > 0) { sent += c2; done = true; }
+          }
+        } catch (_) {}
+      }
+    } else {
+      try {
+        const result = await provider.send(note, t);
+        sent += result?.sent?.length || 0;
+      } catch (_) {}
     }
   }
   return { sent, tokens: tokens.length };

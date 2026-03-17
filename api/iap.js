@@ -44,11 +44,17 @@ function toIsoOrNull(msOrIso) {
 /* =========================
    Provider logic (NON-COMMUN)
 ========================= */
-function appleBaseUrl() {
-  const env = (process.env.APPLE_ENV || "production").toLowerCase();
-  return env === "sandbox"
+function appleBaseUrlByEnv(env) {
+  const e = String(env || "production").toLowerCase();
+  return e === "sandbox"
     ? "https://api.storekit-sandbox.itunes.apple.com"
     : "https://api.storekit.itunes.apple.com";
+}
+
+function appleBaseUrl() {
+  // Compat: conserve l’ancienne fonction si appelée sans mode auto
+  const env = (process.env.APPLE_ENV || "production").toLowerCase();
+  return appleBaseUrlByEnv(env);
 }
 
 /**
@@ -65,46 +71,52 @@ async function verifyWithApple(transactionId) {
     const jwtPayload = base64UrlDecodeToJson(parts[1]);
   } catch {}
 
-  const envLog = (process.env.APPLE_ENV || "production").toLowerCase();
-  const base = appleBaseUrl();
-  const url = `${base}/inApps/v1/transactions/${encodeURIComponent(transactionId)}`;
+  const envPref = (process.env.APPLE_ENV || "production").toLowerCase();
+  const order = envPref === "auto" ? ["production", "sandbox"] : [envPref];
 
-  const res = await fetch(url, {
-    method: "GET",
-    headers: { Authorization: `Bearer ${jwtToken}`, "Content-Type": "application/json", Accept: "application/json" },
-  });
+  let lastErr = null;
+  for (const env of order) {
+    const base = appleBaseUrlByEnv(env);
+    const url = `${base}/inApps/v1/transactions/${encodeURIComponent(transactionId)}`;
+    try {
+      const res = await fetch(url, {
+        method: "GET",
+        headers: { Authorization: `Bearer ${jwtToken}`, "Content-Type": "application/json", Accept: "application/json" },
+      });
 
-  const text = await res.text();
+      const text = await res.text();
+      let json;
+      try { json = text ? JSON.parse(text) : {}; } catch { json = { raw: text }; }
 
-  let json;
-  try {
-    json = text ? JSON.parse(text) : {};
-  } catch {
-    json = { raw: text };
+      if (!res.ok) {
+        const msg = json?.errorMessage || json?.message || json?.error || `Apple API error (${res.status})`;
+        const err = new Error(msg);
+        err.status = res.status;
+        err.details = json;
+        throw err;
+      }
+
+      const signedTx = json?.signedTransactionInfo;
+      if (!signedTx) throw new Error("Apple response missing signedTransactionInfo");
+
+      const payload = decodeJwsPayload(signedTx);
+      return {
+        providerTxId: payload.transactionId,
+        originalTxId: payload.originalTransactionId || null,
+        storeProductId: payload.productId,
+        purchasedAt: toIsoOrNull(payload.purchaseDate),
+        expiresAt: toIsoOrNull(payload.expiresDate),
+        raw: { apple: json, signedTransactionInfo: signedTx, decoded: payload, envTried: env },
+      };
+    } catch (e) {
+      lastErr = e;
+      // En mode auto, on tente l’autre environnement si échec
+      if (envPref !== "auto") break;
+      // sinon on continue la boucle pour tenter l’autre env
+    }
   }
-
-  if (!res.ok) {
-    const msg =
-      json?.errorMessage || json?.message || json?.error || `Apple API error (${res.status})`;
-    const err = new Error(msg);
-    err.status = res.status;
-    err.details = json;
-    throw err;
-  }
-
-  const signedTx = json?.signedTransactionInfo;
-  if (!signedTx) throw new Error("Apple response missing signedTransactionInfo");
-
-  const payload = decodeJwsPayload(signedTx);
-
-  return {
-    providerTxId: payload.transactionId,
-    originalTxId: payload.originalTransactionId || null,
-    storeProductId: payload.productId,
-    purchasedAt: toIsoOrNull(payload.purchaseDate),
-    expiresAt: toIsoOrNull(payload.expiresDate),
-    raw: { apple: json, signedTransactionInfo: signedTx, decoded: payload },
-  };
+  // Si on arrive ici, c’est un échec sur tous les environnements testés
+  throw lastErr || new Error("Apple verification failed");
 }
 
 /**
