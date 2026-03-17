@@ -45,6 +45,24 @@ const APNS_PRIVATE_KEY = process.env.APNS_PRIVATE_KEY;
 const APNS_ENV = (process.env.APNS_ENV || "sandbox").toLowerCase();
 
 let apnProvider = null;
+let apnProviders = {};
+
+function getApnProviderByEnv(env) {
+  const mode = String(env || 'production').toLowerCase();
+  if (apnProviders[mode]) return apnProviders[mode];
+  if (!APNS_TEAM_ID || !APNS_KEY_ID || !APNS_BUNDLE_ID || !APNS_PRIVATE_KEY) {
+    return null;
+  }
+  const key = APNS_PRIVATE_KEY.includes("\\n")
+    ? APNS_PRIVATE_KEY.replace(/\\n/g, "\n")
+    : APNS_PRIVATE_KEY;
+  const provider = new apn.Provider({
+    token: { key, keyId: APNS_KEY_ID, teamId: APNS_TEAM_ID },
+    production: mode === 'production',
+  });
+  apnProviders[mode] = provider;
+  return provider;
+}
 
 function getApnProvider() {
   if (apnProvider) return apnProvider;
@@ -157,6 +175,62 @@ router.post("/push/send", async (req, res) => {
       });
     }
 
+    try {
+      const apnsProvider = getApnProvider();
+      if (apnsProvider || APNS_ENV === 'auto') {
+        const iosTargets = Array.isArray(targetUserIds)
+          ? Array.from(new Set(targetUserIds.filter(Boolean)))
+          : [];
+        if (iosTargets.length > 0) {
+          const { data: iosRows } = await supabaseClient
+            .from("device_push_tokens")
+            .select("user_id, token")
+            .in("user_id", iosTargets)
+            .eq("platform", "ios")
+            .eq("provider", "apns")
+            .eq("enabled", true);
+
+          if (Array.isArray(iosRows)) {
+            for (const t of iosRows) {
+              const note = new apn.Notification();
+              note.topic = APNS_BUNDLE_ID;
+              note.alert = { title, body: message };
+              note.sound = "default";
+              note.pushType = "alert";
+              note.priority = 10;
+              note.payload = { data, url };
+
+              if (APNS_ENV === 'auto') {
+                const prod = getApnProviderByEnv('production');
+                const sbx  = getApnProviderByEnv('sandbox');
+                let done = false;
+                try {
+                  if (prod) {
+                    const r1 = await prod.send(note, t.token);
+                    const c1 = r1?.sent?.length || 0;
+                    if (c1 > 0) { done = true; }
+                  }
+                } catch (_) {}
+                if (!done) {
+                  try {
+                    if (sbx) {
+                      const r2 = await sbx.send(note, t.token);
+                      const c2 = r2?.sent?.length || 0;
+                      if (c2 > 0) { done = true; }
+                    }
+                  } catch (_) {}
+                }
+              } else {
+                try {
+                  await apnsProvider.send(note, t.token);
+                } catch (_) {}
+              }
+            }
+          }
+        }
+      }
+    } catch (_) {}
+
     res.json({ success: true, sent });
   } catch (e) {
     res.status(500).json({ error: e?.message || "Erreur interne" });
@@ -204,6 +278,59 @@ router.post("/push/relay", async (req, res) => {
         }
       }
     }
+
+    try {
+      const apnsProvider = getApnProvider();
+      if (apnsProvider || APNS_ENV === 'auto') {
+        if (targetUserId) {
+          const { data: iosRows } = await supabaseClient
+            .from("device_push_tokens")
+            .select("user_id, token")
+            .eq("user_id", targetUserId)
+            .eq("platform", "ios")
+            .eq("provider", "apns")
+            .eq("enabled", true);
+
+          if (Array.isArray(iosRows)) {
+            for (const t of iosRows) {
+              const note = new apn.Notification();
+              note.topic = APNS_BUNDLE_ID;
+              note.alert = { title, body: message };
+              note.sound = "default";
+              note.pushType = "alert";
+              note.priority = 10;
+              note.payload = { data, url };
+
+              if (APNS_ENV === 'auto') {
+                const prod = getApnProviderByEnv('production');
+                const sbx  = getApnProviderByEnv('sandbox');
+                let done = false;
+                try {
+                  if (prod) {
+                    const r1 = await prod.send(note, t.token);
+                    const c1 = r1?.sent?.length || 0;
+                    if (c1 > 0) { done = true; }
+                  }
+                } catch (_) {}
+                if (!done) {
+                  try {
+                    if (sbx) {
+                      const r2 = await sbx.send(note, t.token);
+                      const c2 = r2?.sent?.length || 0;
+                      if (c2 > 0) { done = true; }
+                    }
+                  } catch (_) {}
+                }
+              } else {
+                try {
+                  await apnsProvider.send(note, t.token);
+                } catch (_) {}
+              }
+            }
+          }
+        }
+      }
+    } catch (_) {}
 
     res.json({ success: true, sent });
   } catch (e) {
@@ -264,6 +391,59 @@ router.post("/supabase-notification", async (req, res) => {
       }
     }
 
+    try {
+      const apnsProvider = getApnProvider();
+      if (apnsProvider || APNS_ENV === 'auto') {
+        if (targetUserId) {
+          const { data: iosRows } = await supabaseClient
+            .from("device_push_tokens")
+            .select("user_id, token")
+            .eq("user_id", targetUserId)
+            .eq("platform", "ios")
+            .eq("provider", "apns")
+            .eq("enabled", true);
+
+          if (Array.isArray(iosRows)) {
+            for (const t of iosRows) {
+              const note = new apn.Notification();
+              note.topic = APNS_BUNDLE_ID;
+              note.alert = { title, body: message };
+              note.sound = "default";
+              note.pushType = "alert";
+              note.priority = 10;
+              note.payload = { data, url };
+
+              if (APNS_ENV === 'auto') {
+                const prod = getApnProviderByEnv('production');
+                const sbx  = getApnProviderByEnv('sandbox');
+                let done = false;
+                try {
+                  if (prod) {
+                    const r1 = await prod.send(note, t.token);
+                    const c1 = r1?.sent?.length || 0;
+                    if (c1 > 0) { done = true; }
+                  }
+                } catch (_) {}
+                if (!done) {
+                  try {
+                    if (sbx) {
+                      const r2 = await sbx.send(note, t.token);
+                      const c2 = r2?.sent?.length || 0;
+                      if (c2 > 0) { done = true; }
+                    }
+                  } catch (_) {}
+                }
+              } else {
+                try {
+                  await apnsProvider.send(note, t.token);
+                } catch (_) {}
+              }
+            }
+          }
+        }
+      }
+    } catch (_) {}
+
     res.json({ success: true, sent });
   } catch (e) {
     res.status(500).json({ error: e?.message || "Erreur interne" });
@@ -281,7 +461,7 @@ router.post("/push/send-ios", async (req, res) => {
       return res.status(500).json({ error: "missing_apns_bundle_id" });
     }
     const provider = getApnProvider();
-    if (!provider) return res.status(200).json({ success: false, reason: "apns_not_configured" });
+    if (!provider && APNS_ENV !== 'auto') return res.status(200).json({ success: false, reason: "apns_not_configured" });
 
     const supabaseClient = getSupabaseClient();
     const { title, message, targetUserIds = [], data = {}, url = "/" } = req.body || {};
@@ -314,7 +494,6 @@ let sent = 0;
 let failed = 0;
 
 for (const t of rows) {
-  
   const note = new apn.Notification();
   note.topic = APNS_BUNDLE_ID;
   note.alert = { title, body: message };
@@ -323,17 +502,46 @@ for (const t of rows) {
   note.priority = 10;
   note.payload = { data, url };
 
-  try {
-    const result = await provider.send(note, t.token);
-    sent += result.sent?.length || 0;
-    failed += result.failed?.length || 0;
-  } catch (e) {
-    console.error("apns_send_error", {
-      user_id: t.user_id,
-      token: (t.token || "").slice(0, 10) + "...",
-      message: e?.message,
-    });
-    failed++;
+  if (APNS_ENV === 'auto') {
+    const prod = getApnProviderByEnv('production');
+    const sbx  = getApnProviderByEnv('sandbox');
+    let done = false;
+    try {
+      if (prod) {
+        const r1 = await prod.send(note, t.token);
+        const c1 = r1?.sent?.length || 0;
+        const f1 = r1?.failed?.length || 0;
+        if (c1 > 0) { sent += c1; failed += f1; done = true; }
+      }
+    } catch (e) {
+      console.error("apns_send_error_prod", { user_id: t.user_id, token: (t.token||'').slice(0,10)+"...", message: e?.message });
+    }
+    if (!done) {
+      try {
+        if (sbx) {
+          const r2 = await sbx.send(note, t.token);
+          const c2 = r2?.sent?.length || 0;
+          const f2 = r2?.failed?.length || 0;
+          if (c2 > 0) { sent += c2; failed += f2; done = true; }
+        }
+      } catch (e) {
+        console.error("apns_send_error_sbx", { user_id: t.user_id, token: (t.token||'').slice(0,10)+"...", message: e?.message });
+      }
+    }
+    if (!done) failed++;
+  } else {
+    try {
+      const result = await provider.send(note, t.token);
+      sent += result.sent?.length || 0;
+      failed += result.failed?.length || 0;
+    } catch (e) {
+      console.error("apns_send_error", {
+        user_id: t.user_id,
+        token: (t.token || "").slice(0, 10) + "...",
+        message: e?.message,
+      });
+      failed++;
+    }
   }
 }
 
