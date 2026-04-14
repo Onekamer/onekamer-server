@@ -8048,6 +8048,7 @@ app.post("/api/events/:eventId/checkout", async (req, res) => {
     if (userErr || !userData?.user) return res.status(401).json({ error: "invalid_token" });
 
     const userId = userData.user.id;
+    const userEmail = userData.user.email || null;
     const { payment_mode } = req.body || {};
     const paymentMode = payment_mode === "deposit" ? "deposit" : "full";
 
