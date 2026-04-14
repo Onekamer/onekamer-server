@@ -193,12 +193,51 @@ router.post("/qrcode/generate", async (req, res) => {
     const { event_id } = req.body || {};
     if (!event_id) return res.status(400).json({ error: "event_id requis" });
 
+    // Sécurité: empêcher la génération si l'événement est payant et non payé
+    try {
+      const snap = await getPaymentSnapshot({ eventId: event_id, userId: user_id });
+      if (!snap) {
+        return res.status(403).json({ error: "payment_required" });
+      }
+      const st = String(snap.status || '').toLowerCase();
+      const isFree = st === 'free';
+      const isPaid = st === 'paid';
+      if (!isFree && !isPaid) {
+        return res.status(403).json({ error: "payment_required" });
+      }
+
+      // Branche Événement gratuit: autoriser plusieurs QR actifs (limite 10)
+      if (isFree) {
+        const { count, error: cntErr } = await supabase
+          .from('event_qrcodes')
+          .select('id', { count: 'exact', head: true })
+          .eq('user_id', user_id)
+          .eq('event_id', event_id)
+          .eq('status', 'active');
+        if (cntErr) return res.status(500).json({ error: cntErr.message || 'count_failed' });
+        if ((count || 0) >= 10) return res.status(429).json({ error: 'limit_reached' });
+
+        const qrcode_value = crypto.randomUUID();
+        const { data, error } = await supabase
+          .from('event_qrcodes')
+          .insert([{ user_id, event_id, qrcode_value }])
+          .select('qrcode_value, status')
+          .single();
+        if (error) return res.status(500).json({ error: error.message });
+        const qrImage = await QRCode.toDataURL(qrcode_value, QR_STYLE);
+        return res.json({ qrcode_value, qrImage, status: data?.status || 'active' });
+      }
+    } catch (_) {
+      return res.status(403).json({ error: "payment_required" });
+    }
+
+    // Branche Événement payant ET payé: retourner l'existant sinon créer
     const { data: existing } = await supabase
-      .from("event_qrcodes")
-      .select("id, qrcode_value, status")
-      .eq("user_id", user_id)
-      .eq("event_id", event_id)
-      .eq("status", "active")
+      .from('event_qrcodes')
+      .select('id, qrcode_value, status')
+      .eq('user_id', user_id)
+      .eq('event_id', event_id)
+      .eq('status', 'active')
       .maybeSingle();
 
     if (existing) {
@@ -208,15 +247,13 @@ router.post("/qrcode/generate", async (req, res) => {
 
     const qrcode_value = crypto.randomUUID();
     const { data, error } = await supabase
-      .from("event_qrcodes")
+      .from('event_qrcodes')
       .insert([{ user_id, event_id, qrcode_value }])
-      .select("qrcode_value, status")
+      .select('qrcode_value, status')
       .single();
-
     if (error) return res.status(500).json({ error: error.message });
-
     const qrImage = await QRCode.toDataURL(qrcode_value, QR_STYLE);
-    return res.json({ qrcode_value, qrImage, status: data?.status || "active" });
+    return res.json({ qrcode_value, qrImage, status: data?.status || 'active' });
   } catch (e) {
     return res.status(500).json({ error: e?.message || "Erreur interne" });
   }
