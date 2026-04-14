@@ -6,6 +6,12 @@ import { createClient } from "@supabase/supabase-js";
 const router = express.Router();
 router.use(express.json());
 
+const QR_STYLE = {
+  color: { dark: "#2BA84A", light: "#FFFFFF" },
+  margin: 1,
+  scale: 8,
+};
+
 let supabaseClient = null;
 function getSupabaseClient() {
   if (supabaseClient) return supabaseClient;
@@ -196,7 +202,7 @@ router.post("/qrcode/generate", async (req, res) => {
       .maybeSingle();
 
     if (existing) {
-      const qrImage = await QRCode.toDataURL(existing.qrcode_value);
+      const qrImage = await QRCode.toDataURL(existing.qrcode_value, QR_STYLE);
       return res.json({ qrcode_value: existing.qrcode_value, qrImage, status: existing.status });
     }
 
@@ -209,7 +215,7 @@ router.post("/qrcode/generate", async (req, res) => {
 
     if (error) return res.status(500).json({ error: error.message });
 
-    const qrImage = await QRCode.toDataURL(qrcode_value);
+    const qrImage = await QRCode.toDataURL(qrcode_value, QR_STYLE);
     return res.json({ qrcode_value, qrImage, status: data?.status || "active" });
   } catch (e) {
     return res.status(500).json({ error: e?.message || "Erreur interne" });
@@ -535,7 +541,7 @@ router.get("/qrcode/my", async (req, res) => {
     const items = await Promise.all(
       baseItems.map(async (row) => {
         try {
-          const qrImage = await QRCode.toDataURL(row.qrcode_value);
+          const qrImage = await QRCode.toDataURL(row.qrcode_value, QR_STYLE);
           return { ...row, qrImage };
         } catch {
           return { ...row, qrImage: null };

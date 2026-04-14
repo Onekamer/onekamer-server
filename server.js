@@ -1710,6 +1710,7 @@ app.post("/api/events/:eventId/intent", async (req, res) => {
     if (userErr || !userData?.user) return res.status(401).json({ error: "invalid_token" });
 
     const userId = userData.user.id;
+    const userEmail = userData.user.email || null;
     const { payment_mode } = req.body || {};
     const paymentMode = payment_mode === "deposit" ? "deposit" : "full";
 
@@ -1780,6 +1781,7 @@ app.post("/api/events/:eventId/intent", async (req, res) => {
       amount: stripeAmountFromMajor(amountToPay, currency),
       currency,
       automatic_payment_methods: { enabled: true },
+      ...(userEmail ? { receipt_email: userEmail } : {}),
       metadata: { type: "event_payment", eventId: String(eventId), userId, paymentMode },
     });
 
@@ -8131,8 +8133,9 @@ app.post("/api/events/:eventId/checkout", async (req, res) => {
           quantity: 1,
         },
       ],
-      success_url: `${process.env.FRONTEND_URL}/paiement-success?eventId=${eventId}`,
-      cancel_url: `${process.env.FRONTEND_URL}/paiement-annule?eventId=${eventId}`,
+      success_url: `${process.env.FRONTEND_URL}/compte/mon-qrcode?eventId=${eventId}&thanks=1`,
+      cancel_url: `${process.env.FRONTEND_URL}/evenements?eventId=${eventId}`,
+      ...(userEmail ? { customer_email: userEmail } : {}),
       metadata: { userId, eventId, paymentMode },
     });
 
