@@ -2461,14 +2461,31 @@ function normalizeCurrencyValue(cur) {
   try {
     const raw = String(cur || "").trim().toLowerCase();
     if (!raw) return null;
-    if (raw === "€" || raw === "eur" || raw === "euro" || raw === "euros") return "eur";
-    if (raw === "cfa" || raw === "fcfa" || raw === "xaf" || raw === "x.af" || raw === "x-af") return "xaf";
-    if (raw === "usd" || raw === "$" || raw === "dollar" || raw === "dollars") return "usd";
-    if (raw === "cad" || raw === "c$" || raw === "can$" || raw === "canadian" || raw === "canada") return "cad";
+    if (raw.includes("€") || raw.includes("eur") || raw.includes("euro")) return "eur";
+    if (raw.includes("usd") || raw.includes("dollar") || raw.includes("$")) return "usd";
+    if (raw.includes("cad") || raw.includes("can")) return "cad";
+    if (raw.includes("xaf") || raw.includes("fcfa") || raw.includes("cfa")) return "xaf";
     if (["eur", "usd", "cad", "xaf"].includes(raw)) return raw;
     return null;
   } catch {
     return null;
+  }
+}
+
+// Convertit un montant exprimé en unités "majeures" (ex: 10 EUR) en plus petite unité Stripe
+// - Devises à 0 décimales (ex: XAF/XOF/JPY): arrondi à l'entier
+// - EUR/USD/CAD: montant × 100
+function stripeAmountFromMajor(amount, currency) {
+  try {
+    const zeroDecimal = new Set([
+      "bif", "clp", "djf", "gnf", "jpy", "kmf", "krw", "mga", "pyg", "rwf", "ugx", "vnd", "vuv", "xaf", "xof", "xpf",
+    ]);
+    const n = Number(amount || 0);
+    if (!Number.isFinite(n) || n <= 0) return 0;
+    const cur = String(currency || "").toLowerCase();
+    return zeroDecimal.has(cur) ? Math.round(n) : Math.round(n * 100);
+  } catch {
+    return 0;
   }
 }
 
