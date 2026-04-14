@@ -6687,13 +6687,18 @@ async function stripeWebhookHandler(req, res) {
 
           const { data: ev, error: evErr } = await supabase
             .from("evenements")
-            .select("id, price_amount, currency")
+            .select("id, price_amount, currency, price")
             .eq("id", eventId)
             .maybeSingle();
           if (evErr) throw new Error(evErr.message);
 
-          const amountTotal = typeof ev?.price_amount === "number" ? ev.price_amount : null;
-          const currency = ev?.currency ? String(ev.currency).toLowerCase() : null;
+          let currency = ev?.currency ? String(ev.currency).toLowerCase() : null;
+          currency = normalizeCurrencyValue(currency) || normalizeCurrencyValue(ev?.price) || "eur";
+
+          let amountTotal = typeof ev?.price_amount === "number" ? ev.price_amount : 0;
+          if (!amountTotal || amountTotal <= 0) {
+            amountTotal = stripeAmountFromMajor(parsePriceMajor(ev?.price), currency);
+          }
 
           if (!amountTotal || amountTotal <= 0 || !currency) {
             await logEvent({
