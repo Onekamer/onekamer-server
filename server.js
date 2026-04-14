@@ -1724,7 +1724,7 @@ app.post("/api/events/:eventId/intent", async (req, res) => {
     if (!ev) return res.status(404).json({ error: "event_not_found" });
 
     const amountTotal = typeof ev.price_amount === "number" ? ev.price_amount : 0;
-    const currency = ev.currency ? String(ev.currency).toLowerCase() : null;
+    const currency = normalizeCurrencyValue(ev.currency);
     const depositPercent = typeof ev.deposit_percent === "number" ? ev.deposit_percent : null;
 
     if (!currency || !["eur", "usd", "cad", "xaf"].includes(currency)) {
@@ -2455,6 +2455,21 @@ function countryToCurrency(countryCode) {
   if (euroCountries.has(cc)) return "EUR";
   if (cc === "US") return "USD";
   return "USD";
+}
+
+function normalizeCurrencyValue(cur) {
+  try {
+    const raw = String(cur || "").trim().toLowerCase();
+    if (!raw) return null;
+    if (raw === "€" || raw === "eur" || raw === "euro" || raw === "euros") return "eur";
+    if (raw === "cfa" || raw === "fcfa" || raw === "xaf" || raw === "x.af" || raw === "x-af") return "xaf";
+    if (raw === "usd" || raw === "$" || raw === "dollar" || raw === "dollars") return "usd";
+    if (raw === "cad" || raw === "c$" || raw === "can$" || raw === "canadian" || raw === "canada") return "cad";
+    if (["eur", "usd", "cad", "xaf"].includes(raw)) return raw;
+    return null;
+  } catch {
+    return null;
+  }
 }
 
 async function requireUserJWT(req) {
@@ -8006,7 +8021,7 @@ app.post("/api/events/:eventId/checkout", async (req, res) => {
     if (!ev) return res.status(404).json({ error: "event_not_found" });
 
     const amountTotal = typeof ev.price_amount === "number" ? ev.price_amount : 0;
-    const currency = ev.currency ? String(ev.currency).toLowerCase() : null;
+    const currency = normalizeCurrencyValue(ev.currency);
     const depositPercent = typeof ev.deposit_percent === "number" ? ev.deposit_percent : null;
 
     if (!currency || !["eur", "usd", "cad", "xaf"].includes(currency)) {
