@@ -1717,14 +1717,17 @@ app.post("/api/events/:eventId/intent", async (req, res) => {
 
     const { data: ev, error: evErr } = await supabase
       .from("evenements")
-      .select("id, title, price_amount, currency, deposit_percent")
+      .select("id, title, price_amount, currency, deposit_percent, price")
       .eq("id", eventId)
       .maybeSingle();
     if (evErr) throw new Error(evErr.message);
     if (!ev) return res.status(404).json({ error: "event_not_found" });
 
-    const amountTotal = typeof ev.price_amount === "number" ? ev.price_amount : 0;
-    const currency = normalizeCurrencyValue(ev.currency);
+    let amountTotal = typeof ev.price_amount === "number" ? ev.price_amount : 0;
+    if (!amountTotal || amountTotal <= 0) {
+      amountTotal = parsePriceMajor(ev.price);
+    }
+    let currency = normalizeCurrencyValue(ev.currency) || normalizeCurrencyValue(ev.price) || "eur";
     const depositPercent = typeof ev.deposit_percent === "number" ? ev.deposit_percent : null;
 
     if (!currency || !["eur", "usd", "cad", "xaf"].includes(currency)) {
@@ -1774,7 +1777,7 @@ app.post("/api/events/:eventId/intent", async (req, res) => {
     if (upErr) throw new Error(upErr.message);
 
     const pi = await stripe.paymentIntents.create({
-      amount: amountToPay,
+      amount: stripeAmountFromMajor(amountToPay, currency),
       currency,
       automatic_payment_methods: { enabled: true },
       metadata: { type: "event_payment", eventId: String(eventId), userId, paymentMode },
@@ -2484,6 +2487,20 @@ function stripeAmountFromMajor(amount, currency) {
     if (!Number.isFinite(n) || n <= 0) return 0;
     const cur = String(currency || "").toLowerCase();
     return zeroDecimal.has(cur) ? Math.round(n) : Math.round(n * 100);
+  } catch {
+    return 0;
+  }
+}
+
+// Extrait un montant en unités majeures depuis une chaîne (ex: "40,00 €" -> 40)
+function parsePriceMajor(val) {
+  try {
+    const s = String(val || "").trim();
+    if (!s) return 0;
+    const cleaned = s.replace(/[^0-9.,]/g, "").replace(/,(?=\d{1,2}(\D|$))/g, ".");
+    const n = parseFloat(cleaned);
+    if (!Number.isFinite(n) || n <= 0) return 0;
+    return n;
   } catch {
     return 0;
   }
@@ -8031,14 +8048,17 @@ app.post("/api/events/:eventId/checkout", async (req, res) => {
 
     const { data: ev, error: evErr } = await supabase
       .from("evenements")
-      .select("id, title, price_amount, currency, deposit_percent")
+      .select("id, title, price_amount, currency, deposit_percent, price")
       .eq("id", eventId)
       .maybeSingle();
     if (evErr) throw new Error(evErr.message);
     if (!ev) return res.status(404).json({ error: "event_not_found" });
 
-    const amountTotal = typeof ev.price_amount === "number" ? ev.price_amount : 0;
-    const currency = normalizeCurrencyValue(ev.currency);
+    let amountTotal = typeof ev.price_amount === "number" ? ev.price_amount : 0;
+    if (!amountTotal || amountTotal <= 0) {
+      amountTotal = parsePriceMajor(ev.price);
+    }
+    let currency = normalizeCurrencyValue(ev.currency) || normalizeCurrencyValue(ev.price) || "eur";
     const depositPercent = typeof ev.deposit_percent === "number" ? ev.deposit_percent : null;
 
     if (!currency || !["eur", "usd", "cad", "xaf"].includes(currency)) {
@@ -8087,15 +8107,21 @@ app.post("/api/events/:eventId/checkout", async (req, res) => {
       );
     if (upErr) throw new Error(upErr.message);
 
+    const checkoutCurrency = currency;
+    const checkoutAmount = stripeAmountFromMajor(amountToPay, checkoutCurrency);
+    if (!checkoutAmount || checkoutAmount <= 0) {
+      return res.status(400).json({ error: "amount_invalid" });
+    }
+
     const session = await stripe.checkout.sessions.create({
       mode: "payment",
       payment_method_types: ["card"],
       line_items: [
         {
           price_data: {
-            currency,
+            currency: checkoutCurrency,
             product_data: { name: `Billet - ${ev.title || "Évènement"}` },
-            unit_amount: amountToPay,
+            unit_amount: checkoutAmount,
           },
           quantity: 1,
         },
