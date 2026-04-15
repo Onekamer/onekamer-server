@@ -554,7 +554,7 @@ router.get("/qrcode/my", async (req, res) => {
     const { data, error } = await supabase
       .from("event_qrcodes")
       .select(
-        "id, qrcode_value, status, created_at, validated_at, event_id, evenements:event_id(title, date, location, price_amount, currency)"
+        "id, qrcode_value, status, created_at, validated_at, event_id, evenements:event_id(title, date, location, price_amount, currency, price)"
       )
       .eq("user_id", user_id)
       .order("created_at", { ascending: false })

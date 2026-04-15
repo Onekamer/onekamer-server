@@ -8022,7 +8022,7 @@ app.get("/api/events/:eventId", async (req, res) => {
 
     const { data: ev, error: evErr } = await supabase
       .from("evenements")
-      .select("id, title, date, location, price_amount, currency, deposit_percent")
+      .select("id, title, date, location, price_amount, currency, deposit_percent, price, media_url, image_urls")
       .eq("id", eventId)
       .maybeSingle();
     if (evErr) throw new Error(evErr.message);
