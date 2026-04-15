@@ -38,19 +38,8 @@ async function getPaymentSnapshot({ eventId, userId }) {
       .eq("id", eventId)
       .maybeSingle();
     if (evErr) return null;
-
-    const amountTotal = typeof ev?.price_amount === "number" ? ev.price_amount : null;
-    const currency = ev?.currency ? String(ev.currency).toLowerCase() : null;
-
-    if (!amountTotal || amountTotal <= 0 || !currency) {
-      return {
-        status: "free",
-        amount_total: amountTotal,
-        amount_paid: 0,
-        remaining: 0,
-        currency,
-      };
-    }
+    const amountTotalEv = typeof ev?.price_amount === "number" ? ev.price_amount : null;
+    const currencyEv = ev?.currency ? String(ev.currency).toLowerCase() : null;
 
     const { data: pay, error: payErr } = await supabase
       .from("event_payments")
@@ -61,16 +50,22 @@ async function getPaymentSnapshot({ eventId, userId }) {
     if (payErr) return null;
 
     const paid = typeof pay?.amount_paid === "number" ? pay.amount_paid : 0;
-    const total = typeof pay?.amount_total === "number" ? pay.amount_total : amountTotal;
-    const remaining = Math.max(total - paid, 0);
+    const totalFromPay = typeof pay?.amount_total === "number" ? pay.amount_total : null;
+    const currencyFromPay = pay?.currency ? String(pay.currency).toLowerCase() : null;
+    const totalBase = totalFromPay ?? amountTotalEv ?? 0;
+    const currencyBase = currencyFromPay ?? currencyEv ?? null;
 
-    return {
-      status: pay?.status || (paid >= total ? "paid" : paid > 0 ? "deposit_paid" : "unpaid"),
-      amount_total: total,
-      amount_paid: paid,
-      remaining,
-      currency: pay?.currency ? String(pay.currency).toLowerCase() : currency,
-    };
+    if (paid > 0) {
+      const remaining = Math.max(totalBase - paid, 0);
+      const status = paid >= totalBase && totalBase > 0 ? "paid" : "deposit_paid";
+      return { status, amount_total: totalBase, amount_paid: paid, remaining, currency: currencyBase };
+    }
+
+    if (!amountTotalEv || amountTotalEv <= 0 || !currencyEv) {
+      return { status: "free", amount_total: amountTotalEv, amount_paid: 0, remaining: 0, currency: currencyEv };
+    }
+
+    return { status: "unpaid", amount_total: amountTotalEv, amount_paid: 0, remaining: amountTotalEv, currency: currencyEv };
   } catch {
     return null;
   }
