@@ -188,6 +188,24 @@ router.post("/qrcode/generate", async (req, res) => {
     const { event_id } = req.body || {};
     if (!event_id) return res.status(400).json({ error: "event_id requis" });
 
+    // Interdire la génération si l'événement est terminé (priorité à end_date)
+    try {
+      const { data: evInfo } = await supabase
+        .from("evenements")
+        .select("date, end_date")
+        .eq("id", event_id)
+        .maybeSingle();
+      const iso = evInfo?.end_date || evInfo?.date;
+      if (iso) {
+        const today = new Date();
+        today.setHours(0, 0, 0, 0);
+        const d = new Date(iso);
+        if (d < today) {
+          return res.status(400).json({ error: "event_over" });
+        }
+      }
+    } catch (_) {}
+
     // Sécurité: empêcher la génération si l'événement est payant et non payé
     try {
       const snap = await getPaymentSnapshot({ eventId: event_id, userId: user_id });
@@ -549,7 +567,7 @@ router.get("/qrcode/my", async (req, res) => {
     const { data, error } = await supabase
       .from("event_qrcodes")
       .select(
-        "id, qrcode_value, status, created_at, validated_at, event_id, evenements:event_id(title, date, location, price_amount, currency, price)"
+        "id, qrcode_value, status, created_at, validated_at, event_id, evenements:event_id(title, date, end_date, end_time, location, price_amount, currency, price)"
       )
       .eq("user_id", user_id)
       .order("created_at", { ascending: false })
