@@ -6503,6 +6503,76 @@ async function stripeWebhookHandler(req, res) {
         return res.json({ received: true });
       }
 
+      // Gestion des refunds pour événements
+      if (event.type === "charge.refunded" || event.type === "payment_intent.canceled") {
+        const charge = event.data.object;
+        const md = charge?.metadata || {};
+        const type = String(md.type || "");
+
+        if (type === "event_payment") {
+          const userId = md.userId || null;
+          const eventId = md.eventId || null;
+          const amountRefunded = typeof charge?.amount_refunded === "number" ? charge.amount_refunded / 100 : 0;
+          
+          if (userId && eventId && amountRefunded > 0) {
+            try {
+              const { data: existingPay, error: getPayErr } = await supabase
+                .from("event_payments")
+                .select("id, amount_total, amount_paid")
+                .eq("event_id", eventId)
+                .eq("user_id", userId)
+                .maybeSingle();
+              if (getPayErr) throw new Error(getPayErr.message);
+
+              const prevPaid = typeof existingPay?.amount_paid === "number" ? existingPay.amount_paid : 0;
+              const newPaid = Math.max(prevPaid - amountRefunded, 0);
+              const newStatus = newPaid >= (existingPay?.amount_total || 0) ? "paid" : newPaid > 0 ? "deposit_paid" : "refunded";
+
+              const { error: upsertErr } = await supabase
+                .from("event_payments")
+                .upsert({
+                  event_id: eventId,
+                  user_id: userId,
+                  amount_total: existingPay?.amount_total || 0,
+                  amount_paid: newPaid,
+                  currency: existingPay?.currency || null,
+                  status: newStatus,
+                  stripe_payment_intent_id: charge.payment_intent || charge.id,
+                  updated_at: new Date().toISOString(),
+                }, { onConflict: "event_id,user_id" });
+              
+              if (upsertErr) throw new Error(upsertErr.message);
+
+              await logEvent({
+                category: "event_payment",
+                action: event.type === "charge.refunded" ? "charge.refunded" : "payment_intent.canceled",
+                status: "success",
+                userId,
+                context: { 
+                  eventId, 
+                  amountRefunded, 
+                  newPaid, 
+                  newStatus, 
+                  payment_intent_id: charge.payment_intent || charge.id 
+                },
+              });
+            } catch (e) {
+              await logEvent({
+                category: "event_payment",
+                action: event.type === "charge.refunded" ? "charge.refunded" : "payment_intent.canceled",
+                status: "error",
+                userId: md.userId || null,
+                context: { 
+                  eventId: md.eventId || null, 
+                  error: e?.message || String(e), 
+                  payment_intent_id: charge.payment_intent || charge.id 
+                },
+              });
+            }
+          }
+        }
+      }
+
       if (type === "market_order") {
         const orderId = md.market_order_id || null;
         const customerUserId = md.customer_user_id || null;
