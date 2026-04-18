@@ -6464,7 +6464,21 @@ async function stripeWebhookHandler(req, res) {
             const { error: upsertErr } = await supabase
               .from("event_payments")
               .upsert(upsertPayload, { onConflict: "event_id,user_id" });
-            if (upsertErr) throw new Error(upsertErr.message);
+            if (upsertErr) {
+              await logEvent({
+                category: "event_payment",
+                action: "pi.succeeded.upsert_error",
+                status: "error",
+                userId,
+                context: { 
+                  eventId, 
+                  upsertError: upsertErr.message, 
+                  payload: upsertPayload,
+                  payment_intent_id: pi.id 
+                },
+              });
+              throw new Error(upsertErr.message);
+            }
 
             const { data: existingQr, error: qrErr } = await supabase
               .from("event_qrcodes")
