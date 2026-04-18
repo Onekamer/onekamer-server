@@ -34,11 +34,11 @@ async function getPaymentSnapshot({ eventId, userId }) {
 
     const { data: ev, error: evErr } = await supabase
       .from("evenements")
-      .select("id, price_amount, currency")
+      .select("id, price_amount, price, currency")
       .eq("id", eventId)
       .maybeSingle();
     if (evErr) return null;
-    const amountTotalEv = typeof ev?.price_amount === "number" ? ev.price_amount : null;
+    const amountTotalEv = ev?.price_amount != null ? Number(ev.price_amount) : (ev?.price != null ? Number(ev.price) : null);
     const currencyEv = ev?.currency ? String(ev.currency).toLowerCase() : null;
 
     const { data: pay, error: payErr } = await supabase
@@ -49,11 +49,16 @@ async function getPaymentSnapshot({ eventId, userId }) {
       .maybeSingle();
     if (payErr) return null;
 
-    const paid = typeof pay?.amount_paid === "number" ? pay.amount_paid : 0;
-    const totalFromPay = typeof pay?.amount_total === "number" ? pay.amount_total : null;
+    const paid = typeof pay?.amount_paid === "number" ? pay.amount_paid : (Number(pay?.amount_paid) || 0);
+    const totalFromPay = typeof pay?.amount_total === "number" ? pay.amount_total : (pay?.amount_total != null ? Number(pay.amount_total) : null);
     const currencyFromPay = pay?.currency ? String(pay.currency).toLowerCase() : null;
     const totalBase = totalFromPay ?? amountTotalEv ?? 0;
     const currencyBase = currencyFromPay ?? currencyEv ?? null;
+    const payStatus = String(pay?.status || "").toLowerCase();
+    if (["refunded", "disputed", "canceled", "cancelled"].includes(payStatus)) {
+      const remaining = Math.max(totalBase - paid, 0);
+      return { status: "refunded", amount_total: totalBase, amount_paid: paid, remaining, currency: currencyBase };
+    }
 
     if (paid > 0) {
       const remaining = Math.max(totalBase - paid, 0);
@@ -492,6 +497,10 @@ router.get("/qrcode/verify", async (req, res) => {
 
     const payment = await getPaymentSnapshot({ eventId: data.event_id, userId: data.user_id });
 
+    if (!payment || String(payment.status || '').toLowerCase() !== 'paid') {
+      return res.json({ valid: false, message: 'Paiement non valide', event: data.evenements || null, payment });
+    }
+
     await supabase
       .from("event_qrcodes")
       .update({ status: "used", validated_at: new Date().toISOString() })
@@ -529,6 +538,10 @@ router.get("/qrcode/verify-jwt", async (req, res) => {
     }
 
     const payment = await getPaymentSnapshot({ eventId: data.event_id, userId: data.user_id });
+
+    if (!payment || String(payment.status || '').toLowerCase() !== 'paid') {
+      return res.json({ valid: false, message: 'Paiement non valide', event: data.evenements || null, payment });
+    }
 
     await supabase
       .from("event_qrcodes")
