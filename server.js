@@ -6422,7 +6422,7 @@ async function stripeWebhookHandler(req, res) {
       if (type === "event_payment") {
         const userId = md.userId || null;
         const eventId = md.eventId || null;
-        const amountPaidNow = typeof pi?.amount === "number" ? pi.amount : 0;
+        const amountPaidNow = typeof pi?.amount === "number" ? pi.amount / 100 : 0;
         if (userId && eventId && amountPaidNow > 0) {
           try {
             const { data: ev, error: evErr } = await supabase
