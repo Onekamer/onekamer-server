@@ -188,19 +188,30 @@ router.post("/qrcode/generate", async (req, res) => {
     const { event_id } = req.body || {};
     if (!event_id) return res.status(400).json({ error: "event_id requis" });
 
-    // Interdire la génération si l'événement est terminé (priorité à end_date)
+    // Interdire la génération si l'événement est terminé (priorité à end_date + heure)
     try {
       const { data: evInfo } = await supabase
         .from("evenements")
-        .select("date, end_date")
+        .select("date, end_date, end_time")
         .eq("id", event_id)
         .maybeSingle();
-      const iso = evInfo?.end_date || evInfo?.date;
-      if (iso) {
-        const today = new Date();
-        today.setHours(0, 0, 0, 0);
-        const d = new Date(iso);
-        if (d < today) {
+      const dateIso = evInfo?.date;
+      const endDateIso = evInfo?.end_date;
+      const endTime = evInfo?.end_time || "23:59";
+      if (endDateIso) {
+        // Utiliser la date de fin + heure de fin pour le calcul
+        const eventEnd = new Date(`${endDateIso}T${endTime}:00`);
+        const now = new Date();
+        // Autoriser la génération jusqu'à la fin de l'événement
+        if (eventEnd < now) {
+          return res.status(400).json({ error: "event_over" });
+        }
+      } else if (dateIso) {
+        // Fallback : si pas de end_date, utiliser date seule (jour même autorisé)
+        const eventDate = new Date(dateIso);
+        eventDate.setHours(23, 59, 59, 999); // Fin de journée
+        const now = new Date();
+        if (eventDate < now) {
           return res.status(400).json({ error: "event_over" });
         }
       }
