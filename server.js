@@ -6432,9 +6432,26 @@ async function stripeWebhookHandler(req, res) {
               .maybeSingle();
             if (evErr) throw new Error(evErr.message);
 
-            const amountTotal = typeof ev?.price_amount === "number" ? ev.price_amount : 0;
+            // Déterminer le total à payer de façon robuste
+            const amountTotalEvRaw = ev?.price_amount;
+            const amountTotalEv = amountTotalEvRaw != null ? Number(amountTotalEvRaw) : 0;
+            const mdAmountRaw = md?.amountTotal ?? md?.amount_total;
+            const amountTotalMd = mdAmountRaw != null ? Number(mdAmountRaw) : 0;
+            const amountTotal = amountTotalEv > 0 ? amountTotalEv : amountTotalMd;
             if (!amountTotal || amountTotal <= 0) {
-              await logEvent({ category: "event_payment", action: "pi.succeeded.skipped", status: "info", userId, context: { eventId, reason: "event_not_payable", payment_intent_id: pi.id } });
+              await logEvent({
+                category: "event_payment",
+                action: "pi.succeeded.skipped",
+                status: "info",
+                userId,
+                context: {
+                  eventId,
+                  reason: "event_not_payable",
+                  payment_intent_id: pi.id,
+                  price_amount_raw: amountTotalEvRaw ?? null,
+                  md_amount_raw: mdAmountRaw ?? null,
+                },
+              });
               return res.json({ received: true });
             }
 
@@ -6446,16 +6463,17 @@ async function stripeWebhookHandler(req, res) {
               .maybeSingle();
             if (getPayErr) throw new Error(getPayErr.message);
 
-            const prevPaid = typeof existingPay?.amount_paid === "number" ? existingPay.amount_paid : 0;
+            // Supporter amount_paid stocké en NUMERIC (retourné en chaîne par Supabase)
+            const prevPaid = Number(existingPay?.amount_paid) || 0;
             const newPaid = Math.min(prevPaid + amountPaidNow, amountTotal);
-            const newStatus = newPaid >= amountTotal ? "paid" : newPaid > 0 ? "deposit_paid" : "unpaid";
+            const newStatus = newPaid >= amountTotal && amountTotal > 0 ? "paid" : newPaid > 0 ? "deposit_paid" : "unpaid";
 
             const upsertPayload = {
               event_id: eventId,
               user_id: userId,
               amount_total: amountTotal,
               amount_paid: newPaid,
-              currency: ev?.currency ? String(ev.currency).toLowerCase() : null,
+              currency: (ev?.currency ? String(ev.currency).toLowerCase() : null) || (md?.currency ? String(md.currency).toLowerCase() : null),
               status: newStatus,
               stripe_payment_intent_id: pi.id,
               updated_at: new Date().toISOString(),
