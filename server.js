@@ -1782,7 +1782,7 @@ app.post("/api/events/:eventId/intent", async (req, res) => {
       currency,
       automatic_payment_methods: { enabled: true },
       ...(userEmail ? { receipt_email: userEmail } : {}),
-      metadata: { type: "event_payment", eventId: String(eventId), userId, paymentMode },
+      metadata: { type: "event_payment", eventId: String(eventId), userId, paymentMode, amountTotal: String(amountTotal), currency },
     });
 
     await logEvent({
@@ -6427,13 +6427,17 @@ async function stripeWebhookHandler(req, res) {
           try {
             const { data: ev, error: evErr } = await supabase
               .from("evenements")
-              .select("id, price_amount, currency")
+              .select("id, price_amount, price, currency")
               .eq("id", eventId)
               .maybeSingle();
             if (evErr) throw new Error(evErr.message);
+            if (!ev) {
+              await logEvent({ category: "event_payment", action: "pi.succeeded.skipped", status: "info", userId, context: { eventId, reason: "event_not_found", payment_intent_id: pi.id } });
+              return res.json({ received: true });
+            }
 
             // Déterminer le total à payer de façon robuste
-            const amountTotalEvRaw = ev?.price_amount;
+            const amountTotalEvRaw = ev?.price_amount ?? ev?.price;
             const amountTotalEv = amountTotalEvRaw != null ? Number(amountTotalEvRaw) : 0;
             const mdAmountRaw = md?.amountTotal ?? md?.amount_total;
             const amountTotalMd = mdAmountRaw != null ? Number(mdAmountRaw) : 0;
