@@ -6692,6 +6692,44 @@ async function stripeWebhookHandler(req, res) {
     else if (event.type === "charge.refunded" || event.type === "payment_intent.canceled") {
       try {
         const obj = event.data.object;
+        // 1) Identifier le PaymentIntent et tenter un match direct sur event_payments.stripe_payment_intent_id
+        const piId = event.type === "charge.refunded" ? (obj?.payment_intent || null) : event.type === "payment_intent.canceled" ? (obj?.id || null) : null;
+        const refundMinor = typeof obj?.amount_refunded === "number" ? obj.amount_refunded : 0; // Stripe renvoie en unités mineures
+
+        if (piId) {
+          const { data: payByPi } = await supabase
+            .from("event_payments")
+            .select("id, event_id, user_id, amount_total, amount_paid, currency, stripe_payment_intent_id")
+            .eq("stripe_payment_intent_id", piId)
+            .maybeSingle();
+
+          if (payByPi?.id) {
+            const totalRaw = Number(payByPi.amount_total) || 0;
+            const paidRaw = Number(payByPi.amount_paid) || 0;
+            // Heuristique d’échelle: >=1000 => vraisemblablement en unités mineures
+            const scale = (totalRaw >= 1000 || paidRaw >= 1000) ? "minor" : "major";
+            const refundValue = scale === "minor" ? refundMinor : (refundMinor / 100);
+            const newPaid = Math.max(paidRaw - (refundValue || 0), 0);
+            const newStatus = newPaid >= totalRaw && totalRaw > 0 ? "paid" : newPaid > 0 ? "deposit_paid" : "refunded";
+
+            const { error: updErr } = await supabase
+              .from("event_payments")
+              .update({ amount_paid: newPaid, status: newStatus, updated_at: new Date().toISOString() })
+              .eq("id", payByPi.id);
+            if (updErr) throw new Error(updErr.message);
+
+            await logEvent({
+              category: "event_payment",
+              action: `${event.type}.by_pi`,
+              status: "success",
+              userId: payByPi.user_id || null,
+              context: { eventId: payByPi.event_id || null, payment_intent_id: piId, scale, refundMinor, newPaid, newStatus },
+            });
+            return res.json({ received: true });
+          }
+        }
+
+        // 2) Fallback: métadonnées (compat historique)
         let md = obj?.metadata || {};
         let type = String(md.type || "");
         let userId = md.userId || md.user_id || null;
@@ -6708,13 +6746,11 @@ async function stripeWebhookHandler(req, res) {
             await logEvent({ category: "event_payment", action: "refund.meta_fallback", status: "error", context: { error: e?.message || String(e), payment_intent_id: obj.payment_intent || null } });
           }
         }
-        if (type !== "event_payment") {
+        if (type !== "event_payment" || !userId || !eventId) {
           return res.json({ received: true });
         }
-        const amountRefunded = typeof obj?.amount_refunded === "number" ? obj.amount_refunded / 100 : 0;
-        if (!userId || !eventId) return res.json({ received: true });
 
-        // Pour payment_intent.canceled, amount_refunded est souvent 0; on passe quand même à refunded si aucun paiement effectif
+        // Lecture ligne paiement par (event_id, user_id)
         const { data: existingPay, error: getPayErr } = await supabase
           .from("event_payments")
           .select("id, amount_total, amount_paid, currency")
@@ -6723,31 +6759,33 @@ async function stripeWebhookHandler(req, res) {
           .maybeSingle();
         if (getPayErr) throw new Error(getPayErr.message);
 
-        const prevPaid = Number(existingPay?.amount_paid) || 0;
-        const newPaid = Math.max(prevPaid - (amountRefunded || 0), 0);
-        const total = Number(existingPay?.amount_total) || 0;
-        const newStatus = newPaid >= total && total > 0 ? "paid" : newPaid > 0 ? "deposit_paid" : "refunded";
+        const totalRaw = Number(existingPay?.amount_total) || 0;
+        const paidRaw = Number(existingPay?.amount_paid) || 0;
+        const scale = (totalRaw >= 1000 || paidRaw >= 1000) ? "minor" : "major";
+        const refundValue = scale === "minor" ? refundMinor : (refundMinor / 100);
+        const newPaid = Math.max(paidRaw - (refundValue || 0), 0);
+        const newStatus = newPaid >= totalRaw && totalRaw > 0 ? "paid" : newPaid > 0 ? "deposit_paid" : "refunded";
 
         const { error: upsertErr } = await supabase
           .from("event_payments")
           .upsert({
             event_id: eventId,
             user_id: userId,
-            amount_total: total,
+            amount_total: totalRaw,
             amount_paid: newPaid,
             currency: existingPay?.currency || null,
             status: newStatus,
-            stripe_payment_intent_id: obj.payment_intent || obj.id,
+            stripe_payment_intent_id: piId || obj.payment_intent || obj.id || null,
             updated_at: new Date().toISOString(),
           }, { onConflict: "event_id,user_id" });
         if (upsertErr) throw new Error(upsertErr.message);
 
         await logEvent({
           category: "event_payment",
-          action: event.type,
+          action: `${event.type}.by_meta`,
           status: "success",
           userId,
-          context: { eventId, amountRefunded: amountRefunded || 0, newPaid, newStatus, payment_intent_id: obj.payment_intent || obj.id },
+          context: { eventId, payment_intent_id: piId || obj.payment_intent || obj.id || null, scale, refundMinor, newPaid, newStatus },
         });
         return res.json({ received: true });
       } catch (e) {
