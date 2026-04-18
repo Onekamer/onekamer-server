@@ -6461,6 +6461,24 @@ async function stripeWebhookHandler(req, res) {
               updated_at: new Date().toISOString(),
             };
 
+            // Log du payload avant upsert
+            await logEvent({
+              category: "event_payment",
+              action: "pi.succeeded.before_upsert",
+              status: "info",
+              userId,
+              context: { 
+                eventId, 
+                amountTotal,
+                amountPaidNow,
+                newPaid,
+                newStatus,
+                currency: ev?.currency,
+                payload: upsertPayload,
+                payment_intent_id: pi.id 
+              },
+            });
+
             const { error: upsertErr } = await supabase
               .from("event_payments")
               .upsert(upsertPayload, { onConflict: "event_id,user_id" });
