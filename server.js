@@ -6469,7 +6469,7 @@ async function stripeWebhookHandler(req, res) {
 
             // Supporter amount_paid stocké en NUMERIC (retourné en chaîne par Supabase)
             const prevPaid = Number(existingPay?.amount_paid) || 0;
-            const newPaid = Math.min(prevPaid + amountPaidNow, amountTotal);
+            const newPaid = prevPaid + amountPaidNow; // cumul, sans plafonner au total
             const newStatus = newPaid >= amountTotal && amountTotal > 0 ? "paid" : newPaid > 0 ? "deposit_paid" : "unpaid";
 
             const upsertPayload = {
@@ -6520,20 +6520,13 @@ async function stripeWebhookHandler(req, res) {
               throw new Error(upsertErr.message);
             }
 
-            const { data: existingQr, error: qrErr } = await supabase
-              .from("event_qrcodes")
-              .select("id")
-              .eq("event_id", eventId)
-              .eq("user_id", userId)
-              .eq("status", "active")
-              .maybeSingle();
-            if (qrErr) throw new Error(qrErr.message);
-
-            if (!existingQr) {
-              const qrcode_value = crypto.randomUUID();
-              const { error: insQrErr } = await supabase
-                .from("event_qrcodes")
-                .insert([{ user_id: userId, event_id: eventId, qrcode_value }]);
+            // Créer un QR par unité achetée supplémentaire
+            const unitsBefore = Math.floor(prevPaid / amountTotal);
+            const unitsAfter = Math.floor(newPaid / amountTotal);
+            const toCreate = Math.max(0, unitsAfter - unitsBefore);
+            if (toCreate > 0) {
+              const rows = Array.from({ length: toCreate }, () => ({ user_id: userId, event_id: eventId, qrcode_value: crypto.randomUUID() }));
+              const { error: insQrErr } = await supabase.from("event_qrcodes").insert(rows);
               if (insQrErr) throw new Error(insQrErr.message);
             }
 
@@ -6718,6 +6711,30 @@ async function stripeWebhookHandler(req, res) {
               .eq("id", payByPi.id);
             if (updErr) throw new Error(updErr.message);
 
+            // Invalider les QR codes correspondant aux unités remboursées
+            if (totalRaw > 0) {
+              const unitsBefore = Math.floor(paidRaw / totalRaw);
+              const unitsAfter = Math.floor(newPaid / totalRaw);
+              const toInvalidate = Math.max(0, unitsBefore - unitsAfter);
+              if (toInvalidate > 0) {
+                const { data: qrs } = await supabase
+                  .from("event_qrcodes")
+                  .select("id")
+                  .eq("event_id", payByPi.event_id)
+                  .eq("user_id", payByPi.user_id)
+                  .eq("status", "active")
+                  .order("id", { ascending: false })
+                  .limit(toInvalidate);
+                const ids = Array.isArray(qrs) ? qrs.map((r) => r.id) : [];
+                if (ids.length > 0) {
+                  await supabase
+                    .from("event_qrcodes")
+                    .update({ status: "refunded" })
+                    .in("id", ids);
+                }
+              }
+            }
+
             await logEvent({
               category: "event_payment",
               action: `${event.type}.by_pi`,
@@ -6779,6 +6796,30 @@ async function stripeWebhookHandler(req, res) {
             updated_at: new Date().toISOString(),
           }, { onConflict: "event_id,user_id" });
         if (upsertErr) throw new Error(upsertErr.message);
+
+        // Invalider les QR codes correspondant aux unités remboursées
+        if (totalRaw > 0) {
+          const unitsBefore = Math.floor((Number(existingPay?.amount_paid) || 0) / totalRaw);
+          const unitsAfter = Math.floor(newPaid / totalRaw);
+          const toInvalidate = Math.max(0, unitsBefore - unitsAfter);
+          if (toInvalidate > 0) {
+            const { data: qrs } = await supabase
+              .from("event_qrcodes")
+              .select("id")
+              .eq("event_id", eventId)
+              .eq("user_id", userId)
+              .eq("status", "active")
+              .order("id", { ascending: false })
+              .limit(toInvalidate);
+            const ids = Array.isArray(qrs) ? qrs.map((r) => r.id) : [];
+            if (ids.length > 0) {
+              await supabase
+                .from("event_qrcodes")
+                .update({ status: "refunded" })
+                .in("id", ids);
+            }
+          }
+        }
 
         await logEvent({
           category: "event_payment",
@@ -6887,8 +6928,8 @@ async function stripeWebhookHandler(req, res) {
             .maybeSingle();
           if (getPayErr) throw new Error(getPayErr.message);
 
-          const prevPaid = typeof existingPay?.amount_paid === "number" ? existingPay.amount_paid : 0;
-          const newPaid = Math.min(prevPaid + paidAmount, amountTotal);
+          const prevPaid = Number(existingPay?.amount_paid) || 0;
+          const newPaid = prevPaid + paidAmount; // cumul en unités mineures
           const newStatus = newPaid >= amountTotal ? "paid" : newPaid > 0 ? "deposit_paid" : "unpaid";
 
           const upsertPayload = {
@@ -6908,20 +6949,13 @@ async function stripeWebhookHandler(req, res) {
             .upsert(upsertPayload, { onConflict: "event_id,user_id" });
           if (upsertErr) throw new Error(upsertErr.message);
 
-          const { data: existingQr, error: qrErr } = await supabase
-            .from("event_qrcodes")
-            .select("id")
-            .eq("event_id", eventId)
-            .eq("user_id", userId)
-            .eq("status", "active")
-            .maybeSingle();
-          if (qrErr) throw new Error(qrErr.message);
-
-          if (!existingQr) {
-            const qrcode_value = crypto.randomUUID();
-            const { error: insQrErr } = await supabase
-              .from("event_qrcodes")
-              .insert([{ user_id: userId, event_id: eventId, qrcode_value }]);
+          // Créer un QR par unité achetée supplémentaire (échelle mineure)
+          const unitsBefore = Math.floor(prevPaid / amountTotal);
+          const unitsAfter = Math.floor(newPaid / amountTotal);
+          const toCreate = Math.max(0, unitsAfter - unitsBefore);
+          if (toCreate > 0) {
+            const rows = Array.from({ length: toCreate }, () => ({ user_id: userId, event_id: eventId, qrcode_value: crypto.randomUUID() }));
+            const { error: insQrErr } = await supabase.from("event_qrcodes").insert(rows);
             if (insQrErr) throw new Error(insQrErr.message);
           }
 
