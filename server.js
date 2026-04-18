@@ -6557,75 +6557,7 @@ async function stripeWebhookHandler(req, res) {
         return res.json({ received: true });
       }
 
-      // Gestion des refunds pour événements
-      if (event.type === "charge.refunded" || event.type === "payment_intent.canceled") {
-        const charge = event.data.object;
-        const md = charge?.metadata || {};
-        const type = String(md.type || "");
-
-        if (type === "event_payment") {
-          const userId = md.userId || null;
-          const eventId = md.eventId || null;
-          const amountRefunded = typeof charge?.amount_refunded === "number" ? charge.amount_refunded / 100 : 0;
-          
-          if (userId && eventId && amountRefunded > 0) {
-            try {
-              const { data: existingPay, error: getPayErr } = await supabase
-                .from("event_payments")
-                .select("id, amount_total, amount_paid")
-                .eq("event_id", eventId)
-                .eq("user_id", userId)
-                .maybeSingle();
-              if (getPayErr) throw new Error(getPayErr.message);
-
-              const prevPaid = typeof existingPay?.amount_paid === "number" ? existingPay.amount_paid : 0;
-              const newPaid = Math.max(prevPaid - amountRefunded, 0);
-              const newStatus = newPaid >= (existingPay?.amount_total || 0) ? "paid" : newPaid > 0 ? "deposit_paid" : "refunded";
-
-              const { error: upsertErr } = await supabase
-                .from("event_payments")
-                .upsert({
-                  event_id: eventId,
-                  user_id: userId,
-                  amount_total: existingPay?.amount_total || 0,
-                  amount_paid: newPaid,
-                  currency: existingPay?.currency || null,
-                  status: newStatus,
-                  stripe_payment_intent_id: charge.payment_intent || charge.id,
-                  updated_at: new Date().toISOString(),
-                }, { onConflict: "event_id,user_id" });
-              
-              if (upsertErr) throw new Error(upsertErr.message);
-
-              await logEvent({
-                category: "event_payment",
-                action: event.type === "charge.refunded" ? "charge.refunded" : "payment_intent.canceled",
-                status: "success",
-                userId,
-                context: { 
-                  eventId, 
-                  amountRefunded, 
-                  newPaid, 
-                  newStatus, 
-                  payment_intent_id: charge.payment_intent || charge.id 
-                },
-              });
-            } catch (e) {
-              await logEvent({
-                category: "event_payment",
-                action: event.type === "charge.refunded" ? "charge.refunded" : "payment_intent.canceled",
-                status: "error",
-                userId: md.userId || null,
-                context: { 
-                  eventId: md.eventId || null, 
-                  error: e?.message || String(e), 
-                  payment_intent_id: charge.payment_intent || charge.id 
-                },
-              });
-            }
-          }
-        }
-      }
+      // (déplacé plus bas) Gestion des refunds pour événements
 
       if (type === "market_order") {
         const orderId = md.market_order_id || null;
@@ -6755,6 +6687,78 @@ async function stripeWebhookHandler(req, res) {
 
       // Autres types PI: on ignore
       return res.json({ received: true });
+    }
+    // Gestion des refunds pour événements (niveau supérieur)
+    else if (event.type === "charge.refunded" || event.type === "payment_intent.canceled") {
+      try {
+        const obj = event.data.object;
+        let md = obj?.metadata || {};
+        let type = String(md.type || "");
+        let userId = md.userId || md.user_id || null;
+        let eventId = md.eventId || md.event_id || null;
+        // Si l'objet est un charge et que les métadonnées sont incomplètes, récupérer celles du PaymentIntent
+        if (event.type === "charge.refunded" && (!type || !userId || !eventId) && obj?.payment_intent) {
+          try {
+            const pi = await stripe.paymentIntents.retrieve(obj.payment_intent);
+            const mdPi = pi?.metadata || {};
+            if (!type) type = String(mdPi.type || "");
+            if (!userId) userId = mdPi.userId || mdPi.user_id || null;
+            if (!eventId) eventId = mdPi.eventId || mdPi.event_id || null;
+          } catch (e) {
+            await logEvent({ category: "event_payment", action: "refund.meta_fallback", status: "error", context: { error: e?.message || String(e), payment_intent_id: obj.payment_intent || null } });
+          }
+        }
+        if (type !== "event_payment") {
+          return res.json({ received: true });
+        }
+        const amountRefunded = typeof obj?.amount_refunded === "number" ? obj.amount_refunded / 100 : 0;
+        if (!userId || !eventId) return res.json({ received: true });
+
+        // Pour payment_intent.canceled, amount_refunded est souvent 0; on passe quand même à refunded si aucun paiement effectif
+        const { data: existingPay, error: getPayErr } = await supabase
+          .from("event_payments")
+          .select("id, amount_total, amount_paid, currency")
+          .eq("event_id", eventId)
+          .eq("user_id", userId)
+          .maybeSingle();
+        if (getPayErr) throw new Error(getPayErr.message);
+
+        const prevPaid = Number(existingPay?.amount_paid) || 0;
+        const newPaid = Math.max(prevPaid - (amountRefunded || 0), 0);
+        const total = Number(existingPay?.amount_total) || 0;
+        const newStatus = newPaid >= total && total > 0 ? "paid" : newPaid > 0 ? "deposit_paid" : "refunded";
+
+        const { error: upsertErr } = await supabase
+          .from("event_payments")
+          .upsert({
+            event_id: eventId,
+            user_id: userId,
+            amount_total: total,
+            amount_paid: newPaid,
+            currency: existingPay?.currency || null,
+            status: newStatus,
+            stripe_payment_intent_id: obj.payment_intent || obj.id,
+            updated_at: new Date().toISOString(),
+          }, { onConflict: "event_id,user_id" });
+        if (upsertErr) throw new Error(upsertErr.message);
+
+        await logEvent({
+          category: "event_payment",
+          action: event.type,
+          status: "success",
+          userId,
+          context: { eventId, amountRefunded: amountRefunded || 0, newPaid, newStatus, payment_intent_id: obj.payment_intent || obj.id },
+        });
+        return res.json({ received: true });
+      } catch (e) {
+        await logEvent({
+          category: "event_payment",
+          action: event.type,
+          status: "error",
+          context: { error: e?.message || String(e) },
+        });
+        return res.json({ received: true });
+      }
     }
     if (event.type === "account.updated" || event.type === "v2.core.account.updated") {
       const account = event.data.object;
