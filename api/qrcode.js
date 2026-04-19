@@ -460,7 +460,7 @@ router.delete("/qrcode/:id", async (req, res) => {
 
     const { error: delErr } = await supabase
       .from("event_qrcodes")
-      .delete()
+      .update({ deleted: true, deleted_at: new Date().toISOString(), status: "deleted" })
       .eq("id", id)
       .eq("user_id", user_id);
     if (delErr) return res.status(500).json({ error: delErr.message });
@@ -486,6 +486,7 @@ router.get("/qrcode/verify", async (req, res) => {
       .from("event_qrcodes")
       .select("id, status, event_id, user_id, evenements:event_id(title, date, location)")
       .eq("qrcode_value", qrcode_value)
+      .eq("deleted", false)
       .maybeSingle();
 
     if (error) return res.status(500).json({ error: error.message });
@@ -528,6 +529,7 @@ router.get("/qrcode/verify-jwt", async (req, res) => {
       .from("event_qrcodes")
       .select("id, status, event_id, user_id, evenements:event_id(title, date, location)")
       .eq("qrcode_value", qrcode_value)
+      .eq("deleted", false)
       .maybeSingle();
 
     if (error) return res.status(500).json({ error: error.message });
@@ -587,11 +589,12 @@ router.get("/qrcode/my", async (req, res) => {
 
     const user_id = userData.user.id;
     const withImage = String(req.query?.withImage || "0") === "1";
+    const includeDeleted = String(req.query?.includeDeleted || "0") === "1";
 
     const { data, error } = await supabase
       .from("event_qrcodes")
       .select(
-        "id, qrcode_value, status, created_at, validated_at, event_id, evenements!left(title, date, end_date, end_time, location, price_amount, currency, price)"
+        "id, qrcode_value, status, created_at, validated_at, event_id, deleted, deleted_at, evenements!left(title, date, end_date, end_time, location, price_amount, currency, price)"
       )
       .eq("user_id", user_id)
       .order("created_at", { ascending: false })
@@ -600,7 +603,7 @@ router.get("/qrcode/my", async (req, res) => {
     if (error) return res.status(500).json({ error: error.message });
 
     const baseItems = await Promise.all(
-      (data || []).map(async (row) => {
+       (includeDeleted ? (data || []) : (data || []).filter((r) => r?.deleted !== true)).map(async (row) => {
         try {
           const payment = await getPaymentSnapshot({ eventId: row.event_id, userId: user_id });
           return { ...row, payment };

@@ -6427,7 +6427,7 @@ async function stripeWebhookHandler(req, res) {
           try {
             const { data: ev, error: evErr } = await supabase
               .from("evenements")
-              .select("id, price_amount, price, currency")
+              .select("id, price_amount, price, currency, deposit_percent")
               .eq("id", eventId)
               .maybeSingle();
             if (evErr) throw new Error(evErr.message);
@@ -6520,10 +6520,21 @@ async function stripeWebhookHandler(req, res) {
               throw new Error(upsertErr.message);
             }
 
-            // Créer un QR par unité achetée supplémentaire
-            const unitsBefore = Math.floor(prevPaid / amountTotal);
-            const unitsAfter = Math.floor(newPaid / amountTotal);
-            const toCreate = Math.max(0, unitsAfter - unitsBefore);
+            // Créer des QR selon le nombre de billets requis
+            const unitPrice = amountTotal;
+            const isDeposit = String(md?.paymentMode || md?.payment_mode || '').toLowerCase() === 'deposit';
+            const requiredTickets = Math.max(isDeposit && amountPaidNow > 0 ? 1 : 0, unitPrice > 0 ? Math.floor(newPaid / unitPrice) : 0);
+            let existingCount = 0;
+            try {
+              const { count } = await supabase
+                .from("event_qrcodes")
+                .select("id", { count: 'exact', head: true })
+                .eq("event_id", eventId)
+                .eq("user_id", userId)
+                .in("status", ["active", "used"]);
+              existingCount = Number(count || 0);
+            } catch {}
+            const toCreate = Math.max(0, requiredTickets - existingCount);
             if (toCreate > 0) {
               const rows = Array.from({ length: toCreate }, () => ({ user_id: userId, event_id: eventId, qrcode_value: crypto.randomUUID() }));
               const { error: insQrErr } = await supabase.from("event_qrcodes").insert(rows);
@@ -6711,11 +6722,13 @@ async function stripeWebhookHandler(req, res) {
               .eq("id", payByPi.id);
             if (updErr) throw new Error(updErr.message);
 
-            // Invalider les QR codes correspondant aux unités remboursées
+            // Invalider les QR codes correspondant aux billets devenus non dus (gestion acompte)
             if (totalRaw > 0) {
-              const unitsBefore = Math.floor(paidRaw / totalRaw);
-              const unitsAfter = Math.floor(newPaid / totalRaw);
-              const toInvalidate = Math.max(0, unitsBefore - unitsAfter);
+              const beforeUnits = Math.floor((paidRaw || 0) / totalRaw);
+              const afterUnits = Math.floor((newPaid || 0) / totalRaw);
+              const requiredBefore = (paidRaw > 0 ? Math.max(1, beforeUnits) : 0);
+              const requiredAfter = (newPaid > 0 ? Math.max(1, afterUnits) : 0);
+              const toInvalidate = Math.max(0, requiredBefore - requiredAfter);
               if (toInvalidate > 0) {
                 const { data: qrs } = await supabase
                   .from("event_qrcodes")
@@ -6797,11 +6810,14 @@ async function stripeWebhookHandler(req, res) {
           }, { onConflict: "event_id,user_id" });
         if (upsertErr) throw new Error(upsertErr.message);
 
-        // Invalider les QR codes correspondant aux unités remboursées
+        // Invalider les QR codes correspondant aux billets devenus non dus (gestion acompte)
         if (totalRaw > 0) {
-          const unitsBefore = Math.floor((Number(existingPay?.amount_paid) || 0) / totalRaw);
-          const unitsAfter = Math.floor(newPaid / totalRaw);
-          const toInvalidate = Math.max(0, unitsBefore - unitsAfter);
+          const beforePaid = Number(existingPay?.amount_paid) || 0;
+          const beforeUnits = Math.floor(beforePaid / totalRaw);
+          const afterUnits = Math.floor((newPaid || 0) / totalRaw);
+          const requiredBefore = (beforePaid > 0 ? Math.max(1, beforeUnits) : 0);
+          const requiredAfter = (newPaid > 0 ? Math.max(1, afterUnits) : 0);
+          const toInvalidate = Math.max(0, requiredBefore - requiredAfter);
           if (toInvalidate > 0) {
             const { data: qrs } = await supabase
               .from("event_qrcodes")
@@ -6896,7 +6912,7 @@ async function stripeWebhookHandler(req, res) {
 
           const { data: ev, error: evErr } = await supabase
             .from("evenements")
-            .select("id, price_amount, currency, price")
+            .select("id, price_amount, currency, price, deposit_percent")
             .eq("id", eventId)
             .maybeSingle();
           if (evErr) throw new Error(evErr.message);
@@ -6949,10 +6965,21 @@ async function stripeWebhookHandler(req, res) {
             .upsert(upsertPayload, { onConflict: "event_id,user_id" });
           if (upsertErr) throw new Error(upsertErr.message);
 
-          // Créer un QR par unité achetée supplémentaire (échelle mineure)
-          const unitsBefore = Math.floor(prevPaid / amountTotal);
-          const unitsAfter = Math.floor(newPaid / amountTotal);
-          const toCreate = Math.max(0, unitsAfter - unitsBefore);
+          // Créer des QR selon le nombre de billets requis (support acompte)
+          const unitPrice = amountTotal;
+          const isDeposit = String((session?.metadata?.paymentMode || session?.metadata?.payment_mode) || '').toLowerCase() === 'deposit';
+          const requiredTickets = Math.max(isDeposit && paidAmount > 0 ? 1 : 0, unitPrice > 0 ? Math.floor(newPaid / unitPrice) : 0);
+          let existingCount = 0;
+          try {
+            const { count } = await supabase
+              .from("event_qrcodes")
+              .select("id", { count: 'exact', head: true })
+              .eq("event_id", eventId)
+              .eq("user_id", userId)
+              .in("status", ["active", "used"]);
+            existingCount = Number(count || 0);
+          } catch {}
+          const toCreate = Math.max(0, requiredTickets - existingCount);
           if (toCreate > 0) {
             const rows = Array.from({ length: toCreate }, () => ({ user_id: userId, event_id: eventId, qrcode_value: crypto.randomUUID() }));
             const { error: insQrErr } = await supabase.from("event_qrcodes").insert(rows);
@@ -7956,9 +7983,17 @@ app.delete("/api/admin/evenements/:eventId", async (req, res) => {
       return res.status(status).json({ error: verif.reason });
     }
 
-    const { error: delErr } = await supabase.from("evenements").delete().eq("id", eventId);
-    if (delErr) return res.status(500).json({ error: delErr.message || "Erreur suppression événement" });
-    return res.json({ success: true });
+    // Soft-delete si les colonnes existent, sinon fallback hard delete
+    const { error: updErr } = await supabase
+      .from("evenements")
+      .update({ deleted: true, deleted_at: new Date().toISOString() })
+      .eq("id", eventId);
+    if (updErr) {
+      const { error: delErr } = await supabase.from("evenements").delete().eq("id", eventId);
+      if (delErr) return res.status(500).json({ error: delErr.message || "Erreur suppression événement" });
+      return res.json({ success: true, mode: "hard" });
+    }
+    return res.json({ success: true, mode: "soft" });
   } catch (e) {
     console.error("❌ DELETE /api/admin/evenements/:eventId:", e);
     return res.status(500).json({ error: e?.message || "Erreur interne" });
